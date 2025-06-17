@@ -1,42 +1,52 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
 use lazy_static::lazy_static;
 use rand::Rng;
 use rusqlite::{params, Connection};
 
 pub type PortId = usize;
 
-pub struct Port {
-    pub port_id: PortId,
-    port_name_index: Option<usize>,
-    //TODO resource info... generation/usage per cycle, current cost/price
+lazy_static! {
+    static ref NEXT_PORT_ID: AtomicUsize = AtomicUsize::new(1);
 }
 
 lazy_static!{
-    static ref PORT_ID_INDEX_USAGE: Mutex<HashSet<usize>> = Mutex::new(HashSet::new());
+    static ref PORT_NAME_REGISTRY: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+}
+
+pub struct Port {
+    pub port_id: PortId,
+    port_name: String, // derived from port_name_index
+    //TODO resource info... generation/usage per cycle, current cost/price
 }
 
 impl Port {
-    pub fn new(port_id: PortId) -> Port {
-        let mut port_name_index = Option::None;
+    pub fn new() -> Port {
+        let port_id = NEXT_PORT_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut port_name = format!("Port {}", port_id);
+
         let mut try_counter = 20;
         while try_counter > 0 {
             try_counter -= 1;
             let index = rand::rng().random_range(0..Self::PORT_NAMES.len());
-            if !PORT_ID_INDEX_USAGE.lock().unwrap().contains(&try_counter) {
-                port_name_index = Some(index);
+            let proposed_name = Self::PORT_NAMES[index];
+            if !PORT_NAME_REGISTRY.lock().unwrap().contains(proposed_name) {
+                port_name = proposed_name.to_owned();
+                PORT_NAME_REGISTRY.lock().unwrap().insert(proposed_name.to_owned());
                 break;
             }
         }
-        Port{port_id, port_name_index}
+
+        Port{port_id, port_name}
     }
 
-    pub fn port_name(&self) -> String {
-        if self.port_name_index.is_some() {
-            String::from(Port::PORT_NAMES[*(self.port_name_index.as_ref().unwrap())])
-        } else {
-            format!("Port {}", self.port_id)
-        }
+    pub fn get_port_id(&self) -> PortId {
+        self.port_id
+    }
+
+    pub fn get_port_name(&self) -> &String {
+        &self.port_name
     }
 
     /// Writes information about this port to the database.
@@ -44,15 +54,9 @@ impl Port {
     pub fn persist(&self, database: &Connection) {
         let (statement, result) = {
             // TODO resource columns
-            if self.port_name_index.is_some() {
-                let statement = "INSERT INTO ports (portId, portNameIndex) VALUES (?1, ?2);";
-                let params = params![self.port_id, self.port_name_index.unwrap()];
-                (statement, database.execute(statement, params))
-            } else {
-                let statement = "INSERT INTO ports (portId) VALUES (?1);";
-                let params = params![self.port_id];
-                (statement, database.execute(statement, params))
-            }
+            let statement = "INSERT INTO ports (portId, portName) VALUES (?1, ?2);";
+            let params = params![self.port_id, self.port_name];
+            (statement, database.execute(statement, params))
         };
 
         match result {
@@ -69,7 +73,7 @@ impl Port {
     // You can add names to this list without reinitializing your game, but this will cause
     // all of your port names to change beyond the point at which you first added a name.
     // It is strongly recommended that you not remove names from this list without reinitialization.
-    pub const PORT_NAMES: &'static [&'static str] = &[
+    const PORT_NAMES: &'static [&'static str] = &[
         "A-A-Ron",
         "Abercrombie",
         "Acupunk",

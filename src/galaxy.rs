@@ -1,6 +1,5 @@
 use crate::sector::{SectorId, Sector};
-use crate::planet::{PlanetId, Planet};
-use crate::port::{PortId, Port};
+use crate::port::Port;
 
 use rand::Rng;
 use rusqlite::{params, Connection};
@@ -10,18 +9,32 @@ use std::cmp::{max, min};
 pub type GalaxyId = usize;
 
 pub struct Galaxy {
-    pub galaxy_id: GalaxyId,
-    pub galaxy_name: String,
-    pub sectors: HashMap<SectorId, Sector>,
-    pub planets: HashMap<PlanetId, Planet>,
-    pub ports: HashMap<PortId, Port>,
+    galaxy_id: GalaxyId,
+    galaxy_name: String,
+    sectors: HashMap<SectorId, Sector>,
 }
 
 impl Galaxy {
     pub fn new(galaxy_id: GalaxyId,
            galaxy_name: String,
     ) -> Galaxy {
-        Galaxy{galaxy_id, galaxy_name, sectors: Default::default(), planets: Default::default(), ports: Default::default() }
+        Galaxy{galaxy_id, galaxy_name, sectors: Default::default()}
+    }
+
+    pub fn get_galaxy_id(&self) -> GalaxyId {
+        self.galaxy_id
+    }
+
+    pub fn get_galaxy_name(&self) -> &String {
+        &self.galaxy_name
+    }
+
+    pub fn get_sector(&self, sector_id: SectorId) -> &Sector {
+        self.sectors.get(&sector_id).unwrap()
+    }
+
+    pub fn get_mut_sector(&mut self, sector_id: SectorId) -> &mut Sector {
+        self.sectors.get_mut(&sector_id).unwrap()
     }
 
     /// Creates a legacy Galaxy, and incorporates it into the universe.
@@ -38,37 +51,44 @@ impl Galaxy {
     /// # Arguments
     /// * `galaxy_id` a unique GalaxyId to identify this galaxy
     /// * `galaxy_name` admin-supplied galaxy name. Be creative.
-    /// * `first_sector_id` since sectors across the universe have unique ids, we need to know the first usable sector id
-    /// * `first_port_id` as above, but for ports
     /// * `sector_count` number of sectors to be created for this galaxy
     pub fn new_conventional_galaxy(galaxy_id: GalaxyId,
                                    galaxy_name: String,
-                                   first_sector_id: SectorId,
-                                   first_port_id: PortId,
                                    sector_count: usize) -> Galaxy {
         let mut galaxy = Galaxy::new(galaxy_id, galaxy_name);
 
         // create all the sectors first.
+        // start with root sector, then do all the rest.
         println!("Creating {} sectors...", sector_count);
-        let mut sector_id = first_sector_id;
-        for _ in 0..sector_count {
-            galaxy.sectors.insert(sector_id, Sector::new(sector_id));
-            sector_id += 1;
+        let root_sector = Sector::new();
+        let root_sector_id = root_sector.get_sector_id();
+        galaxy.sectors.insert(root_sector_id, root_sector);
+
+        let mut last_sector_id = root_sector_id;
+        for _ in 1..sector_count {
+            let sector = Sector::new();
+            last_sector_id = sector.get_sector_id();
+            galaxy.sectors.insert(sector.get_sector_id(), sector);
         }
 
-        // now do initial random linking.
+        // now do initial random linking. lead off by intentionally linking root sector to a few
+        // of the nearby sectors so we don't just have one line, as can happen randomly.
         println!("Linking sectors...");
         let mut rng = rand::rng();
-        for sector_id in 1..(sector_count + 1) as SectorId {
-            if galaxy.sectors.get(&sector_id).unwrap().links.len() < 6 {
+        while galaxy.get_sector(root_sector_id).get_links().len() < 4 {
+            let target_sector_id = rng.random_range((root_sector_id + 1)..(root_sector_id + 12));
+            galaxy.link_sectors(root_sector_id, target_sector_id);
+        }
+
+        for sector_id in root_sector_id..(last_sector_id + 1) as SectorId {
+            if !galaxy.get_sector(sector_id).has_max_links() {
                 let mut target_id = sector_id;
-                while target_id == sector_id || galaxy.sectors.get(&target_id).unwrap().links.len() == 6 {
+                while target_id == sector_id || galaxy.get_sector(target_id).has_max_links() {
                     let range_low = max((sector_id as isize) - 10, 1) as usize;
-                    let range_high = min(sector_id + 10, sector_count as SectorId);
+                    let range_high = min(sector_id + 10, last_sector_id as SectorId);
                     target_id = rng.random_range(range_low..range_high + 1);
                 }
-                galaxy.sectors.get_mut(&sector_id).unwrap().links.insert(target_id);
-                galaxy.sectors.get_mut(&target_id).unwrap().links.insert(sector_id);
+                galaxy.link_sectors(sector_id, target_id);
             }
         }
 
@@ -77,79 +97,76 @@ impl Galaxy {
         // not vice versa. At this point however, these two values are the same.
         // This should really be a closure since rust functions cannot see things in their containing scope...
         // but closures in rust cannot recurse, and we need to do that.
-        fn distance_func(sector_map: &HashMap<SectorId, Sector>, distances: &mut HashMap<SectorId, isize>, base_id: SectorId, base_distance: isize) {
+        fn distance_func(galaxy: &Galaxy, distances: &mut HashMap<SectorId, isize>, base_id: SectorId, base_distance: isize) {
             distances.insert(base_id, base_distance);
-            for link_id in sector_map.get(&base_id).unwrap().links.iter() {
+            for link_id in galaxy.get_sector(base_id).get_links().iter() {
                 if !distances.contains_key(link_id) {
-                    distance_func(sector_map, distances, *link_id, base_distance + 1)
+                    distance_func(galaxy, distances, *link_id, base_distance + 1)
                 }
             }
         }
 
         println!("Cross-linking disjoint globs...");
         let mut distances = HashMap::<SectorId, isize>::new();
-        distance_func(&galaxy.sectors, &mut distances, 1, 0);
+        distance_func(&galaxy, &mut distances, root_sector_id, 0);
 
         // Now look for sectors for which we do not have a distance - this is a disjoint sector,
         // and we need to link it somewhere into the non-disjoint group, then calculate distances again.
-        for sector_id in 1..(sector_count + 1) as SectorId {
+        for sector_id in root_sector_id..(last_sector_id + 1) as SectorId {
             if !distances.contains_key(&sector_id) {
                 let mut target_id = sector_id;
                 while !distances.contains_key(&target_id) {
-                    target_id = rng.random_range((1 as SectorId)..((sector_count + 1) as SectorId));
+                    target_id = rng.random_range((root_sector_id as SectorId)..((last_sector_id + 1) as SectorId));
                 }
-                galaxy.sectors.get_mut(&sector_id).unwrap().links.insert(target_id);
-                galaxy.sectors.get_mut(&target_id).unwrap().links.insert(sector_id);
                 println!("  Linking sectors {} and {}", sector_id, target_id);
+                galaxy.link_sectors(sector_id, target_id);
 
                 let new_distance = distances.get(&target_id).unwrap() + 1;
-                distance_func(&galaxy.sectors, &mut distances, sector_id, new_distance);
+                distance_func(&galaxy, &mut distances, sector_id, new_distance);
             }
         }
 
         // Finally, look at all the distances. As we find sectors which are too far from the root sector,
         // link them one-way thereto, then recalculate distances for proximate sectors so we don't
         // link more than we have to. This should also be a closure, but...
-        fn distance_recalculate_func(sector_map: &HashMap<SectorId, Sector>, distances: &mut HashMap<SectorId, isize>, base_id: SectorId) {
+        fn distance_recalculate_func(galaxy: &Galaxy, distances: &mut HashMap<SectorId, isize>, base_id: SectorId) {
             // The recursion here is self-limiting - we cannot recurse into places we've already been
             // because they will have a smaller distance than we are looking for, for recursing.
             let our_distance = distances.get(&base_id).unwrap();
             let new_distance = our_distance + 1;
-            for link_id in sector_map.get(&base_id).unwrap().links.iter() {
+            for link_id in galaxy.get_sector(base_id).get_links().iter() {
                 if *distances.get_mut(link_id).unwrap() > new_distance {
                     distances.insert(*link_id, new_distance);
-                    distance_recalculate_func(sector_map, distances, *link_id);
+                    distance_recalculate_func(galaxy, distances, *link_id);
                 }
             }
         }
 
         println!("Creating one-way links back to root sector...");
         const DISTANCE_LIMIT: isize = 20;
-        for sector_id in 1..(sector_count + 1) as SectorId {
+        for sector_id in root_sector_id..(last_sector_id + 1) as SectorId {
             if distances[&sector_id] > DISTANCE_LIMIT {
-                galaxy.sectors.get_mut(&sector_id).unwrap().links.insert(1);
-                println!("  Linking sector {} to sector 1", sector_id);
+                galaxy.get_mut_sector(sector_id).get_links().insert(root_sector_id);
+                println!("  Linking sector {} to root sector", sector_id);
                 distances.insert(sector_id, 1);
-                distance_recalculate_func(&galaxy.sectors, &mut distances, sector_id);
+                distance_recalculate_func(&galaxy, &mut distances, sector_id);
             }
         }
 
         // Create some ports. We create 1 port per 15 sectors,
         // so a galaxy of 1000 sectors would contain 66 ports.
-        // Ports are randomly assign to sectors according to the following rules:
+        // Ports are randomly assigned to sectors according to the following rules:
         // * the sector must be at least 3 sectors from the root
         // * a sector can have at most one port.
         println!("Creating ports...");
         let mut remaining = sector_count / 15;
-        let mut port_id = first_port_id;
         while remaining > 0 {
-            let sector_id = rng.random_range((1 as SectorId)..((sector_count + 1) as SectorId));
-            let sector = galaxy.sectors.get_mut(&sector_id).unwrap();
-            if sector.port_id.is_none() && distances[&sector_id] >= 3 {
-                let port = Port::new(port_id);
-                println!("Port {} ({}) is at sector {}", port_id, port.port_name(), sector_id);
-                galaxy.ports.insert(port_id, port);
-                port_id += 1;
+            let sector_id = rng.random_range(root_sector_id..(last_sector_id + 1) as SectorId);
+            let sector = galaxy.get_mut_sector(sector_id);
+            if !sector.has_port() && distances[&sector_id] >= 3 {
+                let port = Port::new();
+                println!("Port {} ({}) is at sector {}", port.get_port_id(), port.get_port_name(), sector_id);
+                sector.set_port(port);
                 remaining -= 1;
             }
         }
@@ -168,38 +185,55 @@ impl Galaxy {
     /// # Arguments
     /// * `galaxy_id` a unique GalaxyId to identify this galaxy
     /// * `galaxy_name` admin-supplied galaxy name. Be creative.
-    /// * `first_sector_id` since sectors across the universe have unique ids, we need to know the first usable sector id
-    /// * `first_port_id` as above, but for ports
     /// * `branch_count` number of branches per sector
     /// * `sector_count` least number of sectors to be created for this galaxy
     pub fn new_tree_galaxy(galaxy_id: GalaxyId,
                            galaxy_name: String,
-                           first_sector_id: SectorId,
-                           first_port_id: PortId,
                            branch_count: usize,
                            sector_count: usize) -> Galaxy {
         let mut galaxy = Galaxy::new(galaxy_id, galaxy_name);
 
-        // create all the sectors first.
-        let mut sector_id = first_sector_id;
-        for _ in 0..sector_count {
-            galaxy.sectors.insert(sector_id, Sector::new(sector_id));
-            sector_id += 1;
+        println!("Creating ~{} sectors...", sector_count);
+        let root_sector = Sector::new();
+        let mut base_sector_id = root_sector.get_sector_id();
+        galaxy.sectors.insert(root_sector.get_sector_id(), root_sector);
+
+        let mut last_sector_id = base_sector_id;
+        for _ in 1..sector_count {
+            for _ in 0..branch_count {
+                let sector = Sector::new();
+                galaxy.link_sectors(base_sector_id, sector.get_sector_id());
+            }
+
+            last_sector_id = base_sector_id;
+            base_sector_id += 1;
         }
 
-        // now link the tree.
-        let mut base_id: SectorId = 1;
-        let mut target_id: SectorId = 2;
-        while target_id <= sector_count as SectorId {
-            galaxy.sectors.get_mut(&base_id).unwrap().links.insert(target_id);
-            galaxy.sectors.get_mut(&target_id).unwrap().links.insert(base_id);
-            target_id += 1;
-            if galaxy.sectors.get_mut(&base_id).unwrap().links.len() > branch_count as usize {
-                base_id += 1;
+        // Create some ports. We create 1 port per 15 sectors,
+        // so a galaxy of 1000 sectors would contain 66 ports.
+        // Ports are randomly assign to sectors according to the following rules:
+        // * the sector must be at least 3 sectors from the root sector.
+        // * a sector can have at most one port.
+        /*
+            branch count 1:  1  2  3                          -> 4 = 1**2 + 3
+            branch count 2:  1  2,3  4,5,6,7                  -> 8 = 2**2 + 4
+            branch count 3:  1  2,3,4  5,6,7,8,9,10,11,12,13  -> 14 = 3**2 + 5
+            branch count 4:  1  2,3,4,5  6,7,8,9,10,11,12,13,14,15,16,17,18,29,20,21  -> 22 = 4**2 + 6
+         */
+        println!("Creating ports...");
+        let mut rng = rand::rng();
+        let lowest_target_sector_id = base_sector_id + (branch_count * branch_count) + branch_count + 2;
+        let mut remaining = sector_count / 15;
+        while remaining > 0 {
+            let sector_id = rng.random_range(lowest_target_sector_id..(last_sector_id + 1) as SectorId);
+            let sector = galaxy.get_mut_sector(sector_id);
+            if !sector.has_port() {
+                let port = Port::new();
+                println!("Port {} ({}) is at sector {}", port.get_port_id(), port.get_port_name(), sector_id);
+                sector.set_port(port);
+                remaining -= 1;
             }
         }
-
-        // TODO create ports
 
         galaxy
     }
@@ -207,8 +241,8 @@ impl Galaxy {
     // only for debugging purposes
     pub fn dump(&self) {
         for sector in self.sectors.values() {
-            let mut str: String = format!("{} ->", sector.sector_id); //"".to_owned();
-            for link in sector.links.iter() {
+            let mut str: String = format!("{} ->", sector.get_sector_id()); //"".to_owned();
+            for link in sector.get_links().iter() {
                 let sub_str = format!(" {}", link);
                 str.push_str(&sub_str);
             }
@@ -223,8 +257,8 @@ impl Galaxy {
         if sector_id_1 != sector_id_2
             && self.sectors.contains_key(&sector_id_1)
             && self.sectors.contains_key(&sector_id_2) {
-            self.sectors.get_mut(&sector_id_1).unwrap().links.insert(sector_id_2);
-            self.sectors.get_mut(&sector_id_2).unwrap().links.insert(sector_id_1);
+            self.sectors.get_mut(&sector_id_1).unwrap().insert_link_to(sector_id_2);
+            self.sectors.get_mut(&sector_id_2).unwrap().insert_link_to(sector_id_1);
         }
     }
 
@@ -262,7 +296,7 @@ impl Galaxy {
             let sector1 = sector1.unwrap();
 
             // First loop - look for the short completion
-            for sector_id in sector1.links.iter() {
+            for sector_id in sector1.get_links().iter() {
                 if *sector_id == to {
                     result.push(to);
                     break;
@@ -275,7 +309,7 @@ impl Galaxy {
                 let mut pending_result: Vec<SectorId> = Vec::new();
                 sub_avoiding.insert(from);
 
-                for sector_id in sector1.links.iter() {
+                for sector_id in sector1.get_links().iter() {
                     let sub_result = self.find_shortest_path_avoiding(*sector_id, to, &sub_avoiding);
                     if !sub_result.is_empty() {
                         if pending_result.is_empty() || sub_result.is_empty() {
@@ -321,7 +355,7 @@ impl Galaxy {
 
         for sector in self.sectors.values() {
             let statement = "INSERT INTO galaxies_to_sectors (galaxyId, sectorId) VALUES (?1, ?2);";
-            let params = params![self.galaxy_id, sector.sector_id];
+            let params = params![self.galaxy_id, sector.get_sector_id()];
             match database.execute(statement, params) {
                 Ok(_) => (),
                 Err(err) => {
@@ -332,14 +366,6 @@ impl Galaxy {
             }
 
             sector.persist(database);
-        }
-
-        for planet in self.planets.values() {
-            planet.persist(database);
-        }
-
-        for port in self.ports.values() {
-            port.persist(database);
         }
     }
 }

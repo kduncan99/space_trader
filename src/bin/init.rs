@@ -1,4 +1,4 @@
-use std::sync::{LazyLock, Mutex, RwLock};
+use std::sync::{LazyLock, Mutex};
 use rusqlite::{Connection, OpenFlags};
 
 use space_trader::universe::Universe;
@@ -27,7 +27,7 @@ pub const DB_BUILD_STATEMENTS: &'static [&'static str] = &[
 
     "CREATE TABLE ports ( \
                 portId INTEGER NOT NULL,\
-                portNameIndex INTEGER);",
+                portName STRING);",
 
     "CREATE TABLE sector_links ( \
                 fromSectorId INTEGER REFERENCES sectors(sectorId), \

@@ -28,7 +28,7 @@ impl Universe {
     }
 
     pub fn inject_galaxy(&mut self, galaxy: Galaxy) {
-        self.galaxies.insert(galaxy.galaxy_id, galaxy);
+        self.galaxies.insert(galaxy.get_galaxy_id(), galaxy);
     }
 
     /// Initializes a game with one conventional galaxy.
@@ -39,12 +39,11 @@ impl Universe {
     pub fn initialize(&mut self, database: Connection) {
         let galaxy_id: GalaxyId = 1;
         let galaxy_name = String::from("Kronos");
-        let first_sector_id: SectorId = 1;
-        let first_port_id: PortId = 1;
-        let sector_count = 1000usize;
-        let g = Galaxy::new_conventional_galaxy(galaxy_id, galaxy_name, first_sector_id, first_port_id, sector_count);
-        g.persist(&database);
-        self.galaxies.insert(g.galaxy_id, g);
+        let sector_count = 50;// TODO 1000usize;
+        let galaxy = Galaxy::new_conventional_galaxy(galaxy_id, galaxy_name, sector_count);
+        galaxy.dump();//TODO remove
+        galaxy.persist(&database);
+        self.inject_galaxy(galaxy);
     }
 
     /// Loads a game with the content of the given database
