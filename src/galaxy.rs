@@ -1,9 +1,10 @@
+use std::arch::x86_64::_mm_move_epi64;
 use crate::sector::{SectorId, Sector};
 use crate::port::Port;
 
 use rand::Rng;
 use rusqlite::{params, Connection};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, LinkedList};
 use std::cmp::{max, min};
 
 pub type GalaxyId = usize;
@@ -92,11 +93,46 @@ impl Galaxy {
             }
         }
 
-        // Create a map of sectors and their distance from the root sector.
-        // Note that we're really interested in the distance from that sector to the root,
-        // not vice versa. At this point however, these two values are the same.
-        // This should really be a closure since rust functions cannot see things in their containing scope...
-        // but closures in rust cannot recurse, and we need to do that.
+        // Separate the mess into disjoint graphs, then link the disjoint parts so that we
+        // have one completely connected graph.
+        println!("Cross-linking disjoint globs...");
+        let mut disjoint_sets = galaxy.create_disjoint_sector_sets(root_sector_id);
+
+        // Note that we don't need to merge these globs - they're going away almost immediately.
+        // We only use the globs as a means of choosing sectors to be linked, in order to
+        // un-disjoint the globs.
+        let main_glob = disjoint_sets.pop_front().unwrap();
+        while !disjoint_sets.is_empty() {
+            let disjoint_glob = disjoint_sets.pop_front().unwrap();
+
+            // choose a random sector from the base glob and the disjoint glob and link them.
+            let mut ix = root_sector_id;
+            while ix == root_sector_id {
+                ix = rng.random_range(0..main_glob.len());
+            }
+            let sector_id1 = main_glob[ix];
+            let iy = rng.random_range(0..disjoint_glob.len());
+            let sector_id2 = disjoint_glob[iy];
+            galaxy.link_sectors(sector_id1, sector_id2);
+        }
+
+        // Find all the dead-ends. We like dead-ends because things can hide there.
+        // But we don't want too many of them.
+        println!("Cross-linking excess dead ends...");
+        let mut dead_ends = LinkedList::<SectorId>::new();
+        for sector in galaxy.sectors.iter() {
+            if sector.1.get_link_count() == 1 {
+                dead_ends.push_back(*sector.0);
+            }
+        }
+
+        while dead_ends.len() > sector_count / 10 {
+            let sector_id1 = dead_ends.pop_front().unwrap();
+            let sector_id2 = dead_ends.pop_front().unwrap();
+            galaxy.link_sectors(sector_id1, sector_id2);
+        }
+
+        println!("Creating one-way links back to root sector if/as necessary...");
         fn distance_func(galaxy: &Galaxy, distances: &mut HashMap<SectorId, isize>, base_id: SectorId, base_distance: isize) {
             distances.insert(base_id, base_distance);
             for link_id in galaxy.get_sector(base_id).get_links().iter() {
@@ -106,29 +142,6 @@ impl Galaxy {
             }
         }
 
-        println!("Cross-linking disjoint globs...");
-        let mut distances = HashMap::<SectorId, isize>::new();
-        distance_func(&galaxy, &mut distances, root_sector_id, 0);
-
-        // Now look for sectors for which we do not have a distance - this is a disjoint sector,
-        // and we need to link it somewhere into the non-disjoint group, then calculate distances again.
-        for sector_id in root_sector_id..(last_sector_id + 1) as SectorId {
-            if !distances.contains_key(&sector_id) {
-                let mut target_id = sector_id;
-                while !distances.contains_key(&target_id) {
-                    target_id = rng.random_range((root_sector_id as SectorId)..((last_sector_id + 1) as SectorId));
-                }
-                println!("  Linking sectors {} and {}", sector_id, target_id);
-                galaxy.link_sectors(sector_id, target_id);
-
-                let new_distance = distances.get(&target_id).unwrap() + 1;
-                distance_func(&galaxy, &mut distances, sector_id, new_distance);
-            }
-        }
-
-        // Finally, look at all the distances. As we find sectors which are too far from the root sector,
-        // link them one-way thereto, then recalculate distances for proximate sectors so we don't
-        // link more than we have to. This should also be a closure, but...
         fn distance_recalculate_func(galaxy: &Galaxy, distances: &mut HashMap<SectorId, isize>, base_id: SectorId) {
             // The recursion here is self-limiting - we cannot recurse into places we've already been
             // because they will have a smaller distance than we are looking for, for recursing.
@@ -142,12 +155,23 @@ impl Galaxy {
             }
         }
 
-        println!("Creating one-way links back to root sector...");
+        // Create a map of sectors and their distance from the root sector.
+        // Note that we're really interested in the distance from that sector to the root,
+        // not vice versa. At this point however, these two values are the same.
+        // This should really be a closure since rust functions cannot see things in their containing scope...
+        // but closures in rust cannot recurse, and we need to do that.
+        let mut distances = HashMap::<SectorId, isize>::new();
+        distance_func(&galaxy, &mut distances, root_sector_id, 0);
+
+        // Look at the distances. As we find sectors which are too far from the root sector,
+        // link them one-way thereto, then recalculate distances for proximate sectors so we don't
+        // link more than we have to. This should also be a closure, but...
+
         const DISTANCE_LIMIT: isize = 20;
         for sector_id in root_sector_id..(last_sector_id + 1) as SectorId {
             if distances[&sector_id] > DISTANCE_LIMIT {
-                galaxy.get_mut_sector(sector_id).get_links().insert(root_sector_id);
                 println!("  Linking sector {} to root sector", sector_id);
+                galaxy.get_mut_sector(sector_id).insert_link_to(root_sector_id);
                 distances.insert(sector_id, 1);
                 distance_recalculate_func(&galaxy, &mut distances, sector_id);
             }
@@ -173,6 +197,45 @@ impl Galaxy {
 
         // All done.
         galaxy
+    }
+
+    // segregates the sector map into disjoint globs.
+    // The glob containing the root sector id will be the first in the vector.
+    pub fn create_disjoint_sector_sets(&self, root_sector_id: SectorId) -> LinkedList<Vec<SectorId>> {
+        let mut disjoint_sector_sets = LinkedList::<Vec<SectorId>>::new();
+        let mut unassigned_sectors = self.sectors.keys().cloned().collect::<HashSet<_>>();
+
+        fn move_sector_id(sector_map: &HashMap<SectorId, Sector>,
+                          sector_id: SectorId,
+                          from_catalog: &mut HashSet<SectorId>,
+                          to_set: &mut Vec<SectorId>) {
+            if from_catalog.contains(&sector_id) {
+                to_set.push(sector_id);
+                from_catalog.remove(&sector_id);
+                let sector = sector_map.get(&sector_id).unwrap();
+                for neighbor_sector_id in sector.get_links() {
+                    move_sector_id(sector_map, neighbor_sector_id, from_catalog, to_set);
+                }
+            }
+        }
+
+        let mut disjoint_set: Vec<SectorId> = Vec::new();
+        move_sector_id(&self.sectors, root_sector_id, &mut unassigned_sectors, &mut disjoint_set);
+        disjoint_sector_sets.push_back(disjoint_set);
+        
+        loop {
+            let entry = { unassigned_sectors.iter().next() };
+            if entry.is_none() {
+                break
+            }
+
+            let sector_id = entry.unwrap();
+            let mut disjoint_set: Vec<SectorId> = Vec::new();
+            move_sector_id(&self.sectors, *sector_id, &mut unassigned_sectors, &mut disjoint_set);
+            disjoint_sector_sets.push_back(disjoint_set);
+        }
+
+        disjoint_sector_sets
     }
 
     /// Creates a tree-oriented Galaxy, and incorporates it into the universe.
@@ -241,7 +304,7 @@ impl Galaxy {
     // only for debugging purposes
     pub fn dump(&self) {
         for sector in self.sectors.values() {
-            let mut str: String = format!("{} ->", sector.get_sector_id()); //"".to_owned();
+            let mut str: String = format!(":{} ->", sector.get_sector_id()); //"".to_owned();
             for link in sector.get_links().iter() {
                 let sub_str = format!(" {}", link);
                 str.push_str(&sub_str);
@@ -262,6 +325,14 @@ impl Galaxy {
         }
     }
 
+    pub fn link_sector_to(&mut self, from_sector_id: SectorId, to_sector_id: SectorId) {
+        if from_sector_id != to_sector_id
+            && self.sectors.contains_key(&from_sector_id)
+            && self.sectors.contains_key(&to_sector_id) {
+            self.sectors.get_mut(&from_sector_id).unwrap().insert_link_to(to_sector_id);
+        }
+    }
+
     /// Finds the shortest path from one sector to another sector.
     /// The result will contain an ordered list of SectorId values indicating the path
     /// from the first sector (not inclusive), to the targeted sector (inclusive).
@@ -272,6 +343,15 @@ impl Galaxy {
     /// * `to` sector id of the sector we're trying to reach
     pub fn find_shortest_path(&self, from: SectorId, to: SectorId) -> Vec<SectorId> {
         self.find_shortest_path_avoiding(from, to, &HashSet::new())
+    }
+
+    /// Finds the length of the shortest path from one sector to another.
+    ///
+    /// # Arguments
+    /// * `from` sector id of the starting sector
+    /// * `to` sector id of the sector we're trying to reach
+    pub fn find_shortest_path_len(&self, from: SectorId, to: SectorId) -> usize {
+        self.find_shortest_path_avoiding(from, to, &HashSet::new()).len()
     }
 
     /// Finds the shortest path from this sector to the indicated sector.

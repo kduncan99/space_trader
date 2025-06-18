@@ -31,6 +31,10 @@ impl Sector {
         Sector{sector_id, planet: None, port: None, links: HashSet::new()}
     }
 
+    pub fn get_link_count(&self) -> usize {
+        self.links.len()
+    }
+
     pub fn get_links(&self) -> HashSet<SectorId> {
         self.links.clone()
     }

@@ -39,9 +39,8 @@ impl Universe {
     pub fn initialize(&mut self, database: Connection) {
         let galaxy_id: GalaxyId = 1;
         let galaxy_name = String::from("Kronos");
-        let sector_count = 50;// TODO 1000usize;
+        let sector_count = 1000;
         let galaxy = Galaxy::new_conventional_galaxy(galaxy_id, galaxy_name, sector_count);
-        galaxy.dump();//TODO remove
         galaxy.persist(&database);
         self.inject_galaxy(galaxy);
     }
