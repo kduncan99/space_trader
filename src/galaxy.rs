@@ -1,11 +1,9 @@
-use std::arch::x86_64::_mm_move_epi64;
 use crate::sector::{SectorId, Sector};
 use crate::port::Port;
 
 use rand::Rng;
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet, LinkedList};
-use std::cmp::{max, min};
 
 pub type GalaxyId = usize;
 
@@ -72,24 +70,36 @@ impl Galaxy {
             galaxy.sectors.insert(sector.get_sector_id(), sector);
         }
 
-        // now do initial random linking. lead off by intentionally linking root sector to a few
-        // of the nearby sectors so we don't just have one line, as can happen randomly.
+        // Now do initial random-ish linking. For each sector, link to another sector with a
+        // sector-id within 10 (inclusive) above or below. Don't allow any sector to have
+        // more than the max allowable number of links.
         println!("Linking sectors...");
+        let highest_sector_id = (root_sector_id + sector_count - 1) as SectorId;
         let mut rng = rand::rng();
-        while galaxy.get_sector(root_sector_id).get_links().len() < 4 {
-            let target_sector_id = rng.random_range((root_sector_id + 1)..(root_sector_id + 12));
-            galaxy.link_sectors(root_sector_id, target_sector_id);
-        }
-
         for sector_id in root_sector_id..(last_sector_id + 1) as SectorId {
             if !galaxy.get_sector(sector_id).has_max_links() {
-                let mut target_id = sector_id;
-                while target_id == sector_id || galaxy.get_sector(target_id).has_max_links() {
-                    let range_low = max((sector_id as isize) - 10, 1) as usize;
-                    let range_high = min(sector_id + 10, last_sector_id as SectorId);
-                    target_id = rng.random_range(range_low..range_high + 1);
+                loop {
+                    // Set the range such that it allows values too low or too high.
+                    // If the result is indeed out of range, bend it up or down as necessary.
+                    // This gives us interesting artifacts near the root sector and its
+                    // opposite ending sector, which we want for a legacy layout.
+                    // This is a bit messy as we do want to play with potentially negative values
+                    // (albeit briefly), and sector-ids are unsigned.
+                    let offset = rng.random_range(0u32..21u32) as isize - 10;
+                    if offset != 0 { // don't link to ourselves
+                        let mut target_id = sector_id as isize + offset;
+                        if target_id < root_sector_id as isize{
+                            target_id = root_sector_id as isize;
+                        } else if target_id > highest_sector_id as isize {
+                            target_id = highest_sector_id as isize;
+                        }
+
+                        if !galaxy.get_sector(target_id as SectorId).has_max_links() {
+                            galaxy.link_sectors(sector_id, target_id as SectorId);
+                            break;
+                        }
+                    }
                 }
-                galaxy.link_sectors(sector_id, target_id);
             }
         }
 
@@ -97,23 +107,37 @@ impl Galaxy {
         // have one completely connected graph.
         println!("Cross-linking disjoint globs...");
         let mut disjoint_sets = galaxy.create_disjoint_sector_sets(root_sector_id);
+        /* TODO remove this later
+        for set in &mut disjoint_sets {
+            let mut str = format!("Set[{}]", set.len());
+            for sector_id in set.iter() {
+                str = format!("{} {}", str, sector_id);
+            }
+            println!("{}", str);
+        }
+        */
 
         // Note that we don't need to merge these globs - they're going away almost immediately.
         // We only use the globs as a means of choosing sectors to be linked, in order to
-        // un-disjoint the globs.
-        let main_glob = disjoint_sets.pop_front().unwrap();
+        // un-disjoint the globs. However, we get better link distribution if we *do* merge them.
+        let mut main_glob = disjoint_sets.pop_front().unwrap();
         while !disjoint_sets.is_empty() {
             let disjoint_glob = disjoint_sets.pop_front().unwrap();
 
             // choose a random sector from the base glob and the disjoint glob and link them.
-            let mut ix = root_sector_id;
-            while ix == root_sector_id {
+            let mut ix = rng.random_range(0..main_glob.len());
+            while main_glob[ix] == root_sector_id {
                 ix = rng.random_range(0..main_glob.len());
             }
             let sector_id1 = main_glob[ix];
             let iy = rng.random_range(0..disjoint_glob.len());
             let sector_id2 = disjoint_glob[iy];
+            println!("  Linking disjoint {} to {}", sector_id2, sector_id1);
             galaxy.link_sectors(sector_id1, sector_id2);
+            
+            for disjoint_sector_id in disjoint_glob {
+                main_glob.push(disjoint_sector_id);
+            }
         }
 
         // Find all the dead-ends. We like dead-ends because things can hide there.
@@ -132,19 +156,29 @@ impl Galaxy {
             galaxy.link_sectors(sector_id1, sector_id2);
         }
 
-        println!("Creating one-way links back to root sector if/as necessary...");
-        fn distance_func(galaxy: &Galaxy, distances: &mut HashMap<SectorId, isize>, base_id: SectorId, base_distance: isize) {
-            distances.insert(base_id, base_distance);
-            for link_id in galaxy.get_sector(base_id).get_links().iter() {
-                if !distances.contains_key(link_id) {
-                    distance_func(galaxy, distances, *link_id, base_distance + 1)
+        // breadth-first recursion - external caller should invoke with base_id set to root sector id,
+        // and the distances map pre-populated with key of root sector id having value of zero.
+        // We iterate over the neighbors setting them in the map with the distance one more than
+        // that of the given base sector, then iterate again, recursing.
+        fn distance_func(sector_map: &HashMap<SectorId, Sector>, distances: &mut HashMap<SectorId, isize>, base_id: SectorId) {
+            let neighbor_distance = distances.get(&base_id).unwrap() + 1;
+            let mut neighbors_to_visit: HashSet<SectorId> = HashSet::new();
+            for neighbor_sector_id in sector_map.get(&base_id).unwrap().get_links() {
+                if !distances.contains_key(&neighbor_sector_id) {
+                    neighbors_to_visit.insert(neighbor_sector_id);
+                    distances.insert(neighbor_sector_id, neighbor_distance);
                 }
+            }
+
+            for neighbor_sector_id in neighbors_to_visit.iter() {
+                distance_func(sector_map, distances, *neighbor_sector_id);
             }
         }
 
         fn distance_recalculate_func(galaxy: &Galaxy, distances: &mut HashMap<SectorId, isize>, base_id: SectorId) {
             // The recursion here is self-limiting - we cannot recurse into places we've already been
             // because they will have a smaller distance than we are looking for, for recursing.
+            // We should do breadth-first, but this will work.
             let our_distance = distances.get(&base_id).unwrap();
             let new_distance = our_distance + 1;
             for link_id in galaxy.get_sector(base_id).get_links().iter() {
@@ -161,12 +195,13 @@ impl Galaxy {
         // This should really be a closure since rust functions cannot see things in their containing scope...
         // but closures in rust cannot recurse, and we need to do that.
         let mut distances = HashMap::<SectorId, isize>::new();
-        distance_func(&galaxy, &mut distances, root_sector_id, 0);
+        distances.insert(root_sector_id, 0);
+        distance_func(&galaxy.sectors, &mut distances, root_sector_id);
 
         // Look at the distances. As we find sectors which are too far from the root sector,
         // link them one-way thereto, then recalculate distances for proximate sectors so we don't
         // link more than we have to. This should also be a closure, but...
-
+        println!("Creating one-way links back to root sector if/as necessary...");
         const DISTANCE_LIMIT: isize = 20;
         for sector_id in root_sector_id..(last_sector_id + 1) as SectorId {
             if distances[&sector_id] > DISTANCE_LIMIT {
