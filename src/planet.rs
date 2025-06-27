@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use lazy_static::lazy_static;
 use rusqlite::{params, Connection, Result};
+use crate::port::{Port, PortId};
 
 pub type PlanetId = usize;
 
@@ -30,15 +31,17 @@ impl Planet {
 
     /// Creates a planet map describing all the ports in the universe - Used when a game starts up.
     pub fn load_planets(database: &Connection) -> rusqlite::Result<HashMap<PlanetId, Planet>> {
+        let mut stmt = database.prepare("SELECT planetId, planetName FROM planets")?;
+        let mapped_planets = stmt.query_map([], |row| {
+            Ok(Planet{planet_id: row.get(0)?, planet_name: row.get(1)?})
+        })?;
+
         let mut planet_map : HashMap<PlanetId, Planet> = HashMap::new();
-        let select_sql = "SELECT planetId, planetName FROM planets ORDER BY planetId";
-        _ = database.prepare(select_sql)?.query_map([], |row| {
-            let planet_id : PlanetId = row.get(0)?;
-            let planet_name : String = row.get(1)?;
-            planet_map.insert(planet_id, Planet{planet_id, planet_name});
-            NEXT_PLANET_ID.store(planet_id, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        });
+        for planet_result in mapped_planets {
+            let mut planet = planet_result?;
+            crate::planet::NEXT_PLANET_ID.store(planet.planet_id, std::sync::atomic::Ordering::SeqCst);
+            planet_map.insert(planet.planet_id, planet);
+        }
 
         Ok(planet_map)
     }

@@ -4,6 +4,7 @@ use crate::port::Port;
 use rand::Rng;
 use rusqlite::{params, Connection, Result};
 use std::collections::{HashMap, HashSet, LinkedList};
+use rusqlite::fallible_iterator::FallibleIterator;
 use crate::planet::Planet;
 
 pub type GalaxyId = usize;
@@ -445,31 +446,42 @@ impl Galaxy {
     /// * `database` open database connection, containing a valid game database.
     pub fn load_galaxies(database: &Connection) -> Result<Vec<Galaxy>> {
         let mut planet_map = Planet::load_planets(database)?;
+        println!("Loaded {} planets", planet_map.len());
         let mut port_map = Port::load_ports(database)?;
+        println!("Loaded {} ports", port_map.len());
         let mut sector_map= Sector::load_sectors(database, &mut planet_map, &mut port_map)?;
+        println!("Loaded {} sectors", sector_map.len());
 
-        let mut galaxies : Vec<Galaxy> = vec!();
         let mut stmt = database.prepare("SELECT galaxyId, galaxyName FROM galaxies;")?;
-        _ = stmt.query_map([], |row| {
-            let galaxy_id : GalaxyId = row.get(0)?;
-            let galaxy_name : String = row.get(1)?;
+        let mapped_galaxies = stmt.query_map([], |row| {
+            Ok(Galaxy{ galaxy_id: row.get(0)?, galaxy_name: row.get(1)?, sectors: Default::default() })
+        })?;
 
+        let mut galaxies: Vec<Galaxy> = Vec::new();
+        for galaxy_result in mapped_galaxies {
+            let mut galaxy = galaxy_result?;
             let mut galaxy_sector_map: HashMap<SectorId, Sector> = HashMap::new();
-            let select_sql = "SELECT sectors.sectorId FROM sectors \
-                                JOIN galaxies_to_sectors \
-                                WHERE sectors.sectorId = galaxies_to_sectors.sectorId \
-                                AND galaxies_to_sectors.galaxyId = :galaxyId;";
-            _ = database.prepare(select_sql)?.query_map(&[(":galaxyId", &galaxy_id.to_string())], |row| {
-                let sector_id: SectorId = row.get::<usize, SectorId>(0).unwrap();
+            
+            let mut stmt =
+                database.prepare("SELECT sectors.sectorId FROM sectors \
+                    JOIN galaxies_to_sectors \
+                    WHERE sectors.sectorId = galaxies_to_sectors.sectorId \
+                    AND galaxies_to_sectors.galaxyId = :galaxyId")?;
+            let mapped_sectors =
+                stmt.query_map(&[(":galaxyId", &galaxy.galaxy_id.to_string())], |row| {
+                    Ok(row.get(0)?)
+            })?;
+
+            for result_sector in mapped_sectors {
+                let sector_id: SectorId = result_sector?;
                 let sector = sector_map.remove(&sector_id).unwrap();
                 galaxy_sector_map.insert(sector_id, sector);
-                Ok(())
-            });
+            }
 
-            println!("Loaded galaxy {}:{} with {} sectors", galaxy_id, galaxy_name, sector_map.len());
-            galaxies.push(Galaxy{galaxy_id: galaxy_id, galaxy_name: galaxy_name, sectors: galaxy_sector_map});
-            Ok(())
-        })?;
+            println!("Loaded galaxy {}:{} with {} sectors", galaxy.galaxy_id, galaxy.galaxy_name, galaxy_sector_map.len());
+            galaxy.sectors = galaxy_sector_map;
+            galaxies.push(galaxy);
+        }
 
         Ok(galaxies)
     }

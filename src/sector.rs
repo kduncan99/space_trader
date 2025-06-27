@@ -95,42 +95,38 @@ impl Sector {
                         planets: &mut HashMap<PlanetId, Planet>,
                         ports: &mut HashMap<PortId, Port>) -> Result<HashMap<SectorId, Sector>> {
         // initial load of all sectors
-        let mut sector_ids: Vec<SectorId> = vec![];
-        let select_sql = "SELECT sectorId FROM sectors ORDER BY sectorId";
-        _ = database.prepare(select_sql)?.query_map([], |row| {
-            let sector_id : SectorId = row.get(0)?;
-            sector_ids.push(sector_id);
-            NEXT_SECTOR_ID.store(sector_id, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        });
+        let mut stmt = database.prepare("SELECT sectorId FROM sectors ORDER BY sectorId")?;
+        let mapped_sectors = stmt.query_map([], |row| {
+            Ok(Sector{sector_id: row.get(0)?, links: HashSet::new(), port: None, planet: None})
+        })?;
 
         // Iterate over the sectors to load links, planets, and ports
         let mut sectors: HashMap<SectorId, Sector> = HashMap::new();
-        for sector_id in sector_ids {
+        for result_sector in mapped_sectors {
+            let mut sector = result_sector?;
             let mut links: HashSet<SectorId> = HashSet::new();
-            let select_sql = "SELECT toSectorId FROM sectors_to_planets WHERE sectorId = :sectorId";
-            _ = database.prepare(select_sql)?.query_map(&[(":sectorId", &sector_id.to_string())], |row| {
+            let select_sql = "SELECT toSectorId FROM sector_links WHERE fromSectorId = :sectorId";
+            _ = database.prepare(select_sql)?.query_map(&[(":sectorId", &sector.sector_id.to_string())], |row| {
                 links.insert(row.get(0)?);
                 Ok(())
             });
+            sector.links = links;
 
-            let mut planet: Option<Planet> = None;
             let select_sql = "SELECT planetId FROM sectors_to_planets WHERE sectorId = :sectorId";
-            _ = database.prepare(select_sql)?.query_map(&[(":sectorId", &sector_id.to_string())], |row| {
+            _ = database.prepare(select_sql)?.query_map(&[(":sectorId", &sector.sector_id.to_string())], |row| {
                 let planet_id : PlanetId = row.get(0)?;
-                planet = planets.remove(&planet_id);
+                sector.planet = planets.remove(&planet_id);
                 Ok(())
             });
 
-            let mut port: Option<Port> = None;
             let select_sql = "SELECT portId FROM sectors_to_ports WHERE sectorId = :sectorId";
-            _ = database.prepare(select_sql)?.query_map(&[(":sectorId", &sector_id.to_string())], |row| {
+            _ = database.prepare(select_sql)?.query_map(&[(":sectorId", &sector.sector_id.to_string())], |row| {
                 let port_id : PortId = row.get(0)?;
-                port = ports.remove(&port_id);
+                sector.port = ports.remove(&port_id);
                 Ok(())
             });
 
-            sectors.insert(sector_id, Sector{sector_id, planet, port, links});
+            sectors.insert(sector.sector_id, sector);
         }
 
         Ok(sectors)

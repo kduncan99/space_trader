@@ -51,16 +51,18 @@ impl Port {
 
     /// Creates a port map describing all the ports in the universe - Used when a game starts up.
     pub fn load_ports(database: &Connection) -> Result<HashMap<PortId, Port>> {
+        let mut stmt = database.prepare("SELECT portId, portName FROM ports")?;
+        let mapped_ports = stmt.query_map([], |row| {
+            Ok(Port{port_id: row.get(0)?, port_name: row.get(1)?})
+        })?;
+
         let mut port_map : HashMap<PortId, Port> = HashMap::new();
-        let select_sql = "SELECT portId, portName FROM ports";
-        _ = database.prepare(select_sql)?.query_map([], |row| {
-            let port_id : PortId = row.get(0)?;
-            let port_name : String = row.get(1)?;
-            port_map.insert(port_id, Port{port_id, port_name});
-            NEXT_PORT_ID.store(port_id, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        });
-        
+        for port_result in mapped_ports {
+            let mut port = port_result?;
+            NEXT_PORT_ID.store(port.port_id, std::sync::atomic::Ordering::SeqCst);
+            port_map.insert(port.port_id, port);
+        }
+
         Ok(port_map)
     }
 
