@@ -1,29 +1,19 @@
 use crate::galaxy::{GalaxyId, Galaxy};
-use crate::sector::{SectorId, Sector};
-use crate::planet::{PlanetId, Planet};
-use crate::port::{PortId, Port};
+use crate::user::{UserId, User};
 
 use std::collections::HashMap;
 use rusqlite::{Connection, Result};
 
 pub struct Universe {
+    pub users: HashMap<UserId, User>,
     pub galaxies: HashMap<GalaxyId, Galaxy>,
-    pub sectors: HashMap<SectorId, Sector>,
-    pub planets: HashMap<PlanetId, Planet>,
-    pub ports: HashMap<PortId, Port>,
 }
 
 impl Universe {
     pub fn new() -> Universe {
         Universe {
-            // users - all users are players, but not all players are users
-            // players (some are users, some are autonomous)
-            // states (is there a better name?) (special form of players with varying sizes of spheres of influence)
+            users: HashMap::new(),
             galaxies: HashMap::new(),
-            sectors: HashMap::new(),
-            planets: HashMap::new(),
-            ports: HashMap::new(),
-            // ships (all are owned by players)
         }
     }
 
@@ -37,6 +27,14 @@ impl Universe {
     /// * `database` open database connection, with the database initialized to contain all the appropriate
     /// empty tables.
     pub fn initialize(&mut self, database: Connection) -> Result<()> {
+        let admin = User::new(String::from("Admin"), None, None);
+        admin.persist(&database)?;
+        self.users.insert(admin.user_id, admin);
+
+        let neo = User::new(String::from("Neo"), Some(String::from("Neo")), Some(45));
+        neo.persist(&database)?;
+        self.users.insert(neo.user_id, neo);
+
         let galaxy_id: GalaxyId = 1;
         let galaxy_name = String::from("Kronos");
         let sector_count = 1000;
@@ -44,7 +42,7 @@ impl Universe {
         //galaxy.dump();//TODO remove
         galaxy.persist(&database)?;
         self.inject_galaxy(galaxy);
-        
+
         Ok(())
     }
 
@@ -53,10 +51,8 @@ impl Universe {
     /// # Arguments
     /// * `database` open database connection, containing a valid game database.
     pub fn load(&mut self, database: &Connection) -> Result<()> {
-        for galaxy in Galaxy::load_galaxies(database)? {
-            self.galaxies.insert(galaxy.get_galaxy_id(), galaxy);
-        }
-        
+        self.users = User::load_users(database)?;
+        self.galaxies = Galaxy::load_galaxies(database)?;
         Ok(())
     }
 }

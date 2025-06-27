@@ -58,9 +58,10 @@ impl Port {
 
         let mut port_map : HashMap<PortId, Port> = HashMap::new();
         for port_result in mapped_ports {
-            let mut port = port_result?;
+            let port = port_result?;
             NEXT_PORT_ID.store(port.port_id, std::sync::atomic::Ordering::SeqCst);
-            port_map.insert(port.port_id, port);
+            PORT_NAME_REGISTRY.lock().unwrap().insert(port.port_name.clone());
+            port_map.insert(port.port_id + 1, port);
         }
 
         Ok(port_map)

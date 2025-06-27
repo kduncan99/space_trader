@@ -126,6 +126,7 @@ impl Sector {
                 Ok(())
             });
 
+            NEXT_SECTOR_ID.store(sector.sector_id + 1, std::sync::atomic::Ordering::SeqCst);
             sectors.insert(sector.sector_id, sector);
         }
 

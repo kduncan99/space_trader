@@ -9,9 +9,9 @@ fn main() {
     println!("Space Trader - engine");
 
     match process() {
-        Ok(_) => println! ("Space Trader exited successfully"),
+        Ok(_) => (),
         Err(err) => {
-            panic!("Failed to open database: {}", err);
+            panic!("Failed to open or load database: {}", err);
         }
     }
 }
@@ -19,5 +19,6 @@ fn main() {
 fn process() -> Result<()> {
     let database = Connection::open_with_flags("space-trader.db", OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     UNIVERSE.lock().unwrap().load(&database)?;
+    
     Ok(())
 }

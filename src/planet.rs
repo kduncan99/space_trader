@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use lazy_static::lazy_static;
 use rusqlite::{params, Connection, Result};
-use crate::port::{Port, PortId};
 
 pub type PlanetId = usize;
 
@@ -38,9 +37,9 @@ impl Planet {
 
         let mut planet_map : HashMap<PlanetId, Planet> = HashMap::new();
         for planet_result in mapped_planets {
-            let mut planet = planet_result?;
+            let planet = planet_result?;
             crate::planet::NEXT_PLANET_ID.store(planet.planet_id, std::sync::atomic::Ordering::SeqCst);
-            planet_map.insert(planet.planet_id, planet);
+            planet_map.insert(planet.planet_id + 1, planet);
         }
 
         Ok(planet_map)

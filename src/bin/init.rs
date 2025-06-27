@@ -14,6 +14,15 @@ pub const DB_BUILD_STATEMENTS: &'static [&'static str] = &[
     "DROP TABLE IF EXISTS ports;",
     "DROP TABLE IF EXISTS users;",
 
+    "CREATE TABLE users (\
+                userId INTEGER PRIMARY KEY NOT NULL, \
+                userName TEXT NOT NULL UNIQUE, \
+                password TEXT, \
+                gameName TEXT, \
+                isDisabled INTEGER NOT NULL,\
+                minutesPerDay INTEGER, \
+                minutesRemaining INTEGER);",
+
     "CREATE TABLE galaxies ( \
                 galaxyId INTEGER PRIMARY KEY NOT NULL, \
                 galaxyName TEXT NOT NULL);",
@@ -55,24 +64,20 @@ static UNIVERSE: LazyLock<Mutex<Universe>> = LazyLock::new(|| Mutex::new(Univers
 fn main() {
     println!("Space Trader - initializer");
 
-    let database = match Connection::open_with_flags("space-trader.db",
-                                                     OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_READ_WRITE) {
-        Ok(connection) => connection,
-        Err(err) => {
-            panic!("Failed to open database: {}", err);
-        }
-    };
-
-    build_database(&database);
-    match UNIVERSE.lock().unwrap().initialize(database) {
+    match build_database() {
         Ok(_) => println!("Successfully initialized database"),
-        Err(_) => panic!("Failed to initialize database"),
+        Err(msg) => panic!("Failed to initialize database:{msg}"),
     }
 }
 
-fn build_database(database: &Connection) -> Result<()> {
+fn build_database() -> Result<()> {
+    let database = Connection::open_with_flags("space-trader.db",
+                                               OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     for statement in DB_BUILD_STATEMENTS {
         database.execute(statement, ())?;
     }
+
+    UNIVERSE.lock().unwrap().initialize(database)?;
+
     Ok(())
 }

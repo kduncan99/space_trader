@@ -4,7 +4,6 @@ use crate::port::Port;
 use rand::Rng;
 use rusqlite::{params, Connection, Result};
 use std::collections::{HashMap, HashSet, LinkedList};
-use rusqlite::fallible_iterator::FallibleIterator;
 use crate::planet::Planet;
 
 pub type GalaxyId = usize;
@@ -109,15 +108,6 @@ impl Galaxy {
         // have one completely connected graph.
         println!("Cross-linking disjoint globs...");
         let mut disjoint_sets = galaxy.create_disjoint_sector_sets(root_sector_id);
-        /* TODO remove this later
-        for set in &mut disjoint_sets {
-            let mut str = format!("Set[{}]", set.len());
-            for sector_id in set.iter() {
-                str = format!("{} {}", str, sector_id);
-            }
-            println!("{}", str);
-        }
-        */
 
         // Note that we don't need to merge these globs - they're going away almost immediately.
         // We only use the globs as a means of choosing sectors to be linked, in order to
@@ -444,7 +434,7 @@ impl Galaxy {
     ///
     /// # Arguments
     /// * `database` open database connection, containing a valid game database.
-    pub fn load_galaxies(database: &Connection) -> Result<Vec<Galaxy>> {
+    pub fn load_galaxies(database: &Connection) -> Result<HashMap<GalaxyId, Galaxy>> {
         let mut planet_map = Planet::load_planets(database)?;
         println!("Loaded {} planets", planet_map.len());
         let mut port_map = Port::load_ports(database)?;
@@ -457,7 +447,7 @@ impl Galaxy {
             Ok(Galaxy{ galaxy_id: row.get(0)?, galaxy_name: row.get(1)?, sectors: Default::default() })
         })?;
 
-        let mut galaxies: Vec<Galaxy> = Vec::new();
+        let mut galaxies: HashMap<GalaxyId, Galaxy> = HashMap::new();
         for galaxy_result in mapped_galaxies {
             let mut galaxy = galaxy_result?;
             let mut galaxy_sector_map: HashMap<SectorId, Sector> = HashMap::new();
@@ -480,7 +470,7 @@ impl Galaxy {
 
             println!("Loaded galaxy {}:{} with {} sectors", galaxy.galaxy_id, galaxy.galaxy_name, galaxy_sector_map.len());
             galaxy.sectors = galaxy_sector_map;
-            galaxies.push(galaxy);
+            galaxies.insert(galaxy.galaxy_id, galaxy);
         }
 
         Ok(galaxies)
