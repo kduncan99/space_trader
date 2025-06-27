@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use lazy_static::lazy_static;
 use rand::Rng;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Result};
 
 pub type PortId = usize;
 
@@ -49,24 +49,28 @@ impl Port {
         &self.port_name
     }
 
+    /// Creates a port map describing all the ports in the universe - Used when a game starts up.
+    pub fn load_ports(database: &Connection) -> Result<HashMap<PortId, Port>> {
+        let mut port_map : HashMap<PortId, Port> = HashMap::new();
+        let select_sql = "SELECT portId, portName FROM ports";
+        _ = database.prepare(select_sql)?.query_map([], |row| {
+            let port_id : PortId = row.get(0)?;
+            let port_name : String = row.get(1)?;
+            port_map.insert(port_id, Port{port_id, port_name});
+            NEXT_PORT_ID.store(port_id, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        });
+        
+        Ok(port_map)
+    }
+
     /// Writes information about this port to the database.
     /// To be used when the port is first created.
-    pub fn persist(&self, database: &Connection) {
-        let (statement, result) = {
-            // TODO resource columns
-            let statement = "INSERT INTO ports (portId, portName) VALUES (?1, ?2);";
-            let params = params![self.port_id, self.port_name];
-            (statement, database.execute(statement, params))
-        };
-
-        match result {
-            Ok(_) => (),
-            Err(err) => {
-                println!("Database error: {}", err);
-                println!("{}", statement);
-                panic!("Shutting down");
-            }
-        }
+    pub fn persist(&self, database: &Connection) -> Result<()> {
+        let statement = "INSERT INTO ports (portId, portName) VALUES (?1, ?2);";
+        let params = params![self.port_id, self.port_name];
+        database.execute(statement, params)?;
+        Ok(())
     }
 
     // List of pre-built port names - corresponds to the port_name_index value.

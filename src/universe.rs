@@ -16,9 +16,9 @@ pub struct Universe {
 impl Universe {
     pub fn new() -> Universe {
         Universe {
-            // users
+            // users - all users are players, but not all players are users
             // players (some are users, some are autonomous)
-            // states (special form of players with varying sizes of spheres of influence)
+            // states (is there a better name?) (special form of players with varying sizes of spheres of influence)
             galaxies: HashMap::new(),
             sectors: HashMap::new(),
             planets: HashMap::new(),
@@ -36,41 +36,27 @@ impl Universe {
     /// # Arguments
     /// * `database` open database connection, with the database initialized to contain all the appropriate
     /// empty tables.
-    pub fn initialize(&mut self, database: Connection) {
+    pub fn initialize(&mut self, database: Connection) -> Result<()> {
         let galaxy_id: GalaxyId = 1;
         let galaxy_name = String::from("Kronos");
         let sector_count = 1000;
         let galaxy = Galaxy::new_conventional_galaxy(galaxy_id, galaxy_name, sector_count);
         //galaxy.dump();//TODO remove
-        galaxy.persist(&database);
+        galaxy.persist(&database)?;
         self.inject_galaxy(galaxy);
+        
+        Ok(())
     }
 
     /// Loads a game with the content of the given database
     ///
     /// # Arguments
     /// * `database` open database connection, containing a valid game database.
-    pub fn load(&mut self, database: &Connection) {
-        fn sub(universe: &mut Universe, database: &Connection) -> Result<()> {
-            let mut stmt = database.prepare("SELECT * FROM galaxies;")?;
-            let galaxies = stmt.query_map([], |row| {
-                Ok(Galaxy::new(row.get(0)?,row.get(1)?))
-            })?;
-
-            for galaxy in galaxies {
-                let g = galaxy.unwrap();
-                g.load(database);
-                universe.inject_galaxy(g);
-            }
-            Ok(())
+    pub fn load(&mut self, database: &Connection) -> Result<()> {
+        for galaxy in Galaxy::load_galaxies(database)? {
+            self.galaxies.insert(galaxy.get_galaxy_id(), galaxy);
         }
-
-        match sub(self, database) {
-            Ok(_) => (),
-            Err(err) => {
-                println!("Database error: {}", err);
-                panic!("Shutting down");
-            }
-        }
+        
+        Ok(())
     }
 }

@@ -2,8 +2,9 @@ use crate::sector::{SectorId, Sector};
 use crate::port::Port;
 
 use rand::Rng;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Result};
 use std::collections::{HashMap, HashSet, LinkedList};
+use crate::planet::Planet;
 
 pub type GalaxyId = usize;
 
@@ -438,25 +439,44 @@ impl Galaxy {
         result
     }
 
-    /// Loads the indicated galaxy from the database connection.
-    pub fn load(&self, database: &Connection) {
-        println!("Loading galaxy {}:{}", self.galaxy_id, self.galaxy_name);
-        //TODO
-        // SELECT sectors.sectorId FROM sectors JOIN galaxies_to_sectors WHERE sectors.sectorId == galaxies_to_sectors.sectorId;
-        //   iterate over result to create Sector objects and store them in galaxy
-        //   SELECT planets.planet_id planets.planet_name FROM planets JOIN sectors_to_planets WHERE sector_id == {};
-        //   if any (there will be one at most)
-        //     insert the planet-ids into the sector
-        //     insert the planets into the galaxy
-        //   SELECT ports.port_id ports.port_name_index FROM ports JOIN sectors_to_ports WHERE sector_id == {};
-        //   if any (there will be one at most)
-        //     insert the ports into the galaxy
-        //     insert the port-ids into the sector
+    /// Loads all the galaxies from the given database connection.
+    ///
+    /// # Arguments
+    /// * `database` open database connection, containing a valid game database.
+    pub fn load_galaxies(database: &Connection) -> Result<Vec<Galaxy>> {
+        let mut planet_map = Planet::load_planets(database)?;
+        let mut port_map = Port::load_ports(database)?;
+        let mut sector_map= Sector::load_sectors(database, &mut planet_map, &mut port_map)?;
+
+        let mut galaxies : Vec<Galaxy> = vec!();
+        let mut stmt = database.prepare("SELECT galaxyId, galaxyName FROM galaxies;")?;
+        _ = stmt.query_map([], |row| {
+            let galaxy_id : GalaxyId = row.get(0)?;
+            let galaxy_name : String = row.get(1)?;
+
+            let mut galaxy_sector_map: HashMap<SectorId, Sector> = HashMap::new();
+            let select_sql = "SELECT sectors.sectorId FROM sectors \
+                                JOIN galaxies_to_sectors \
+                                WHERE sectors.sectorId = galaxies_to_sectors.sectorId \
+                                AND galaxies_to_sectors.galaxyId = :galaxyId;";
+            _ = database.prepare(select_sql)?.query_map(&[(":galaxyId", &galaxy_id.to_string())], |row| {
+                let sector_id: SectorId = row.get::<usize, SectorId>(0).unwrap();
+                let sector = sector_map.remove(&sector_id).unwrap();
+                galaxy_sector_map.insert(sector_id, sector);
+                Ok(())
+            });
+
+            println!("Loaded galaxy {}:{} with {} sectors", galaxy_id, galaxy_name, sector_map.len());
+            galaxies.push(Galaxy{galaxy_id: galaxy_id, galaxy_name: galaxy_name, sectors: galaxy_sector_map});
+            Ok(())
+        })?;
+
+        Ok(galaxies)
     }
 
     /// Invoked by the initializer to store everything to the database...
     /// Not intended for use during engine processing, since all persistence during execution is piecemeal.
-    pub fn persist(&self, database: &Connection) {
+    pub fn persist(&self, database: &Connection) -> Result<()> {
         let statement = "INSERT INTO galaxies (galaxyId, galaxyName) VALUES (?1, ?2);";
         let params = params![self.galaxy_id, self.galaxy_name];
         match database.execute(statement, params) {
@@ -480,7 +500,9 @@ impl Galaxy {
                 }
             }
 
-            sector.persist(database);
+            sector.persist(database)?;
         }
+        
+        Ok(())
     }
 }

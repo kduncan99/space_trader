@@ -1,5 +1,5 @@
 use std::sync::{LazyLock, Mutex};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, Result};
 
 use space_trader::universe::Universe;
 
@@ -22,8 +22,8 @@ pub const DB_BUILD_STATEMENTS: &'static [&'static str] = &[
                 sectorId INTEGER PRIMARY KEY NOT NULL);",
 
     "CREATE TABLE planets ( \
-                portId INTEGER NOT NULL,\
-                portNameIndex INTEGER);",
+                planetId INTEGER NOT NULL,\
+                planetName STRING);",
 
     "CREATE TABLE ports ( \
                 portId INTEGER NOT NULL,\
@@ -64,22 +64,15 @@ fn main() {
     };
 
     build_database(&database);
-    UNIVERSE.lock().unwrap().initialize(database);
+    match UNIVERSE.lock().unwrap().initialize(database) {
+        Ok(_) => println!("Successfully initialized database"),
+        Err(_) => panic!("Failed to initialize database"),
+    }
 }
 
-fn build_database(database: &Connection) -> bool {
-    let mut result = true;
+fn build_database(database: &Connection) -> Result<()> {
     for statement in DB_BUILD_STATEMENTS {
-        match database.execute(statement, ()) {
-            Ok(_) => (),
-            Err(err) => {
-                println!("Failed to build database: {}", err);
-                println!("{}", statement);
-                result = false;
-                break;
-            }
-        }
+        database.execute(statement, ())?;
     }
-
-    result
+    Ok(())
 }
