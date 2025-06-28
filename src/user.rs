@@ -12,32 +12,32 @@ lazy_static! {
 pub struct User {
     pub user_id: UserId,
     pub user_name: String,
-    pub user_password: Option<String>, // encrypted - if None, user must update on login
-    pub game_name: Option<String>, // if None, user must update on login
+    pub user_password: String,
+    pub game_name: String,
     //
     pub is_disabled: bool,
-    pub minutes_per_day: Option<i32>, // if None, user has no time limit
-    pub minutes_remaining_today: Option<i32> // None if the above is None
+    pub requests_per_day: Option<i32>, // if None, user has no limit
+    pub requests_remaining: Option<i32> // None if the above is None
 }
 
 impl User {
-    pub fn new(user_name: String, game_name: Option<String>, minutes_per_day: Option<i32>) -> User {
+    pub fn new(user_name: String, user_password: String, game_name: String, requests_per_day: Option<i32>) -> User {
         let user_id = NEXT_USER_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        User { user_id, user_name, user_password: None, game_name: game_name,
-            is_disabled: false, minutes_per_day, minutes_remaining_today: minutes_per_day }
+        User { user_id, user_name, user_password, game_name, is_disabled: false,
+            requests_per_day: requests_per_day, requests_remaining: requests_per_day }
     }
 
     pub fn load_users(database: &Connection) -> Result<HashMap<UserId, User>> {
         let mut stmt =
-            database.prepare("SELECT userId, userName, password, gameName, isDisabled, minutesPerDay, minutesRemaining FROM users")?;
+            database.prepare("SELECT userId, userName, password, gameName, isDisabled, requestsPerDay, requestsRemaining FROM users")?;
         let mapped_users = stmt.query_map(params![], |row| {
             Ok(User{user_id: row.get(0)?,
                 user_name: row.get(1)?,
                 user_password: row.get(2)?,
                 game_name: row.get(3)?,
                 is_disabled: row.get(4)?,
-                minutes_per_day: row.get(5)?,
-                minutes_remaining_today: row.get(6)?})
+                requests_per_day: row.get(5)?,
+                requests_remaining: row.get(6)?})
         })?;
 
         let mut user_map = HashMap::new();
@@ -53,12 +53,12 @@ impl User {
 
     pub fn persist(&self, database: &Connection) -> Result<()> {
         let statement = "INSERT INTO users \
-                            (userId, userName, password, gameName, isDisabled, minutesPerDay, minutesRemaining) \
+                            (userId, userName, password, gameName, isDisabled, requestsPerDay, requestsRemaining) \
                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
         let i_disabled = if self.is_disabled { 1 } else { 0 };
         let params =
             params![self.user_id, self.user_name, self.user_password, self.game_name,
-                i_disabled, self.minutes_per_day, self.minutes_remaining_today];
+                i_disabled, self.requests_per_day, self.requests_remaining];
         database.execute(statement, params)?;
         Ok(())
     }

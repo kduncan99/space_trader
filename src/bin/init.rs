@@ -1,7 +1,6 @@
-use std::sync::{LazyLock, Mutex};
 use rusqlite::{Connection, OpenFlags, Result};
 
-use space_trader::universe::Universe;
+use space_trader::universe::UNIVERSE;
 
 pub const DB_BUILD_STATEMENTS: &'static [&'static str] = &[
     "DROP TABLE IF EXISTS galaxies_to_sectors;",
@@ -20,8 +19,8 @@ pub const DB_BUILD_STATEMENTS: &'static [&'static str] = &[
                 password TEXT, \
                 gameName TEXT, \
                 isDisabled INTEGER NOT NULL,\
-                minutesPerDay INTEGER, \
-                minutesRemaining INTEGER);",
+                requestsPerDay INTEGER, \
+                requestsRemaining INTEGER);",
 
     "CREATE TABLE galaxies ( \
                 galaxyId INTEGER PRIMARY KEY NOT NULL, \
@@ -58,8 +57,6 @@ pub const DB_BUILD_STATEMENTS: &'static [&'static str] = &[
                 sectorId INTEGER REFERENCES sectors(sectorId), \
                 PRIMARY KEY (galaxyId, SectorId));",
 ];
-
-static UNIVERSE: LazyLock<Mutex<Universe>> = LazyLock::new(|| Mutex::new(Universe::new()));
 
 fn main() {
     println!("Space Trader - initializer");
