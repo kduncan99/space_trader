@@ -1,15 +1,16 @@
+use std::cmp::max;
 use crate::planet::{Planet, PlanetId};
 use crate::port::{Port, PortId};
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicUsize;
+use std::sync::Mutex;
 use lazy_static::lazy_static;
 use rusqlite::{params, Connection, Result};
 
 pub type SectorId = usize;
 
 lazy_static! {
-    static ref NEXT_SECTOR_ID: AtomicUsize = AtomicUsize::new(1);
+    static ref NEXT_SECTOR_ID: Mutex<SectorId> = Mutex::new(1);
 }
 
 /// Represents a location in space, conceptually contained within a galaxy.
@@ -27,7 +28,9 @@ pub struct Sector {
 
 impl Sector {
     pub fn new() -> Sector {
-        let sector_id = NEXT_SECTOR_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut next_sector_id = NEXT_SECTOR_ID.lock().unwrap();
+        let sector_id = *next_sector_id;
+        *next_sector_id += 1;
         Sector { sector_id, planet: None, port: None, links: HashSet::new() }
     }
 
@@ -101,6 +104,7 @@ impl Sector {
         })?;
 
         // Iterate over the sectors to load links, planets, and ports
+        let mut next_sector_id = NEXT_SECTOR_ID.lock().unwrap();
         let mut sectors: HashMap<SectorId, Sector> = HashMap::new();
         for result_sector in mapped_sectors {
             let mut sector = result_sector?;
@@ -126,7 +130,7 @@ impl Sector {
                 Ok(())
             });
 
-            NEXT_SECTOR_ID.store(sector.sector_id + 1, std::sync::atomic::Ordering::SeqCst);
+            *next_sector_id = max(*next_sector_id, sector.sector_id + 1);
             sectors.insert(sector.sector_id, sector);
         }
 

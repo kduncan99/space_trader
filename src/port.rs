@@ -1,6 +1,6 @@
+use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-use std::sync::atomic::AtomicUsize;
 use lazy_static::lazy_static;
 use rand::Rng;
 use rusqlite::{params, Connection, Result};
@@ -8,7 +8,7 @@ use rusqlite::{params, Connection, Result};
 pub type PortId = usize;
 
 lazy_static! {
-    static ref NEXT_PORT_ID: AtomicUsize = AtomicUsize::new(1);
+    static ref NEXT_PORT_ID: Mutex<PortId> = Mutex::new(1);
 }
 
 lazy_static!{
@@ -23,7 +23,9 @@ pub struct Port {
 
 impl Port {
     pub fn new() -> Port {
-        let port_id = NEXT_PORT_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut next_port_id = NEXT_PORT_ID.lock().unwrap();
+        let port_id = *next_port_id;
+        *next_port_id += 1;
         let mut port_name = format!("Port {}", port_id);
 
         let mut try_counter = 20;
@@ -56,10 +58,11 @@ impl Port {
             Ok(Port{port_id: row.get(0)?, port_name: row.get(1)?})
         })?;
 
+        let mut next_port_id = NEXT_PORT_ID.lock().unwrap();
         let mut port_map : HashMap<PortId, Port> = HashMap::new();
         for port_result in mapped_ports {
             let port = port_result?;
-            NEXT_PORT_ID.store(port.port_id, std::sync::atomic::Ordering::SeqCst);
+            *next_port_id = max(*next_port_id, port.port_id + 1);
             PORT_NAME_REGISTRY.lock().unwrap().insert(port.port_name.clone());
             port_map.insert(port.port_id + 1, port);
         }
@@ -127,6 +130,7 @@ impl Port {
         "Bandana Fiend",
         "BandMaid",
         "Beethoven",
+        "BaLakke",
         "Belinda",
         "Belly Dancer",
         "Bent Guppy",
@@ -157,6 +161,7 @@ impl Port {
         "Chopin",
         "Church Ranch",
         "Cicada",
+        "CisBender",
         "Clarisse",
         "Clementine",
         "Clever Girl",
@@ -181,6 +186,7 @@ impl Port {
         "Desert Watch",
         "Dirty Pair",
         "Dispassionate Donkey",
+        "D-Nice",
         "Dogpatch",
         "Doktari",
         "Don Quixote",
@@ -360,6 +366,7 @@ impl Port {
         "Ix",
         "JackBeNimble",
         "Jaded Strumpet",
+        "Ja Kwellen",
         "Jam",
         "Janice Jump",
         "Jefferson",
@@ -479,6 +486,7 @@ impl Port {
         "Nude Beach",
         "Numbnutz",
         "Nutcase",
+        "O-Shag Hennessy",
         "Obstructed",
         "Obtuse",
         "Ocelot Lot",
@@ -604,6 +612,7 @@ impl Port {
         "Rival Watch",
         "Robber Baron",
         "Rocinate",
+        "Rocket Man",
         "Roddy McDowel",
         "Roger Rabbit",
         "Rolling Thunder",
@@ -779,6 +788,7 @@ impl Port {
         "Trellis",
         "Trouble",
         "Tsunami",
+        "Tu Diep",
         "Turtle Creek",
         "Turtle Eater",
         "Udder Failure",

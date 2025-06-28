@@ -1,12 +1,15 @@
+use std::cmp::max;
 use std::collections::{HashMap};
-use std::sync::atomic::AtomicUsize;
+use std::sync::Mutex;
 use lazy_static::lazy_static;
 use rusqlite::{params, Connection, Result};
 
 pub type UserId = usize;
 
+const ADMIN_USER_ID : UserId = 1;
+
 lazy_static! {
-    static ref NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
+    static ref NEXT_USER_ID: Mutex<UserId> = Mutex::new(1);
 }
 
 pub struct User {
@@ -22,7 +25,9 @@ pub struct User {
 
 impl User {
     pub fn new(user_name: String, user_password: String, game_name: String, requests_per_day: Option<i32>) -> User {
-        let user_id = NEXT_USER_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut next_user_id = NEXT_USER_ID.lock().unwrap();
+        let user_id = *next_user_id;
+        *next_user_id += 1;
         User { user_id, user_name, user_password, game_name, is_disabled: false,
             requests_per_day: requests_per_day, requests_remaining: requests_per_day }
     }
@@ -40,10 +45,11 @@ impl User {
                 requests_remaining: row.get(6)?})
         })?;
 
+        let mut next_user_id = NEXT_USER_ID.lock().unwrap();
         let mut user_map = HashMap::new();
         for user_result in mapped_users {
             let user = user_result?;
-            NEXT_USER_ID.store(user.user_id + 1, std::sync::atomic::Ordering::SeqCst);
+            *next_user_id = max(*next_user_id, user.user_id + 1);
             println!("Loaded user {} {}", user.user_id, user.user_name);
             user_map.insert(user.user_id, user);
         }

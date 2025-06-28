@@ -1,12 +1,13 @@
+use std::cmp::max;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
+use std::sync::Mutex;
 use lazy_static::lazy_static;
 use rusqlite::{params, Connection, Result};
 
 pub type PlanetId = usize;
 
 lazy_static! {
-    static ref NEXT_PLANET_ID: AtomicUsize = AtomicUsize::new(1);
+    static ref NEXT_PLANET_ID: Mutex<PlanetId> = Mutex::new(1);
 }
 
 pub struct Planet {
@@ -16,7 +17,9 @@ pub struct Planet {
 
 impl Planet {
     fn new(planet_name: String) -> Planet {
-        let planet_id = NEXT_PLANET_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut next_planet_id = crate::planet::NEXT_PLANET_ID.lock().unwrap();
+        let planet_id = *next_planet_id;
+        *next_planet_id += 1;
         Planet{planet_id, planet_name}
     }
 
@@ -36,9 +39,10 @@ impl Planet {
         })?;
 
         let mut planet_map : HashMap<PlanetId, Planet> = HashMap::new();
+        let mut next_planet_id = NEXT_PLANET_ID.lock().unwrap();
         for planet_result in mapped_planets {
             let planet = planet_result?;
-            crate::planet::NEXT_PLANET_ID.store(planet.planet_id, std::sync::atomic::Ordering::SeqCst);
+            *next_planet_id = max(*next_planet_id, planet.planet_id + 1);
             planet_map.insert(planet.planet_id + 1, planet);
         }
 

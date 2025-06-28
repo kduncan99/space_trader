@@ -100,7 +100,7 @@ impl Server {
         if user_id.is_none() {
             return Err(HttpResponse{code: 401, detail: "Unauthorized".to_string(), data: "User Not Found or Incorrect Password".to_string()});
         }
-        
+
         Ok(user_id.unwrap())
     }
 }
