@@ -8,4 +8,5 @@ pub mod planet;
 pub mod action;
 pub mod clock;
 pub mod server;
-mod session;
+pub mod session;
+pub mod http_response;

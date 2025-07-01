@@ -1,6 +1,6 @@
+use std::sync::{LazyLock, Mutex};
 use rusqlite::{Connection, OpenFlags, Result};
-
-use space_trader::universe::UNIVERSE;
+use space_trader::universe;
 
 pub const DB_BUILD_STATEMENTS: &'static [&'static str] = &[
     "DROP TABLE IF EXISTS galaxies_to_sectors;",
@@ -11,9 +11,10 @@ pub const DB_BUILD_STATEMENTS: &'static [&'static str] = &[
     "DROP TABLE IF EXISTS sectors;",
     "DROP TABLE IF EXISTS planets;",
     "DROP TABLE IF EXISTS ports;",
+    "DROP TABLE IF EXISTS messages;",
     "DROP TABLE IF EXISTS users;",
 
-    "CREATE TABLE users (\
+    "CREATE TABLE users ( \
                 userId INTEGER PRIMARY KEY NOT NULL, \
                 userName TEXT NOT NULL UNIQUE, \
                 password TEXT, \
@@ -21,6 +22,13 @@ pub const DB_BUILD_STATEMENTS: &'static [&'static str] = &[
                 isDisabled INTEGER NOT NULL,\
                 requestsPerDay INTEGER, \
                 requestsRemaining INTEGER);",
+
+    "CREATE TABLE messages ( \
+                messageId INTEGER PRIMARY KEY, \
+                fromUserId INTEGER REFERENCES users(userId), \
+                toUserId INTEGER NOT NULL REFERENCES users(userId), \
+                timeStamp INTEGER NOT NULL, \
+                text STRING);",
 
     "CREATE TABLE galaxies ( \
                 galaxyId INTEGER PRIMARY KEY NOT NULL, \
@@ -74,7 +82,7 @@ fn build_database() -> Result<()> {
         database.execute(statement, ())?;
     }
 
-    UNIVERSE.lock().unwrap().initialize(database)?;
+    universe::initialize(database)?;
 
     Ok(())
 }

@@ -1,40 +1,23 @@
-use crate::sector::{SectorId, Sector};
-use crate::port::Port;
+use crate::sector::SectorId;
 
 use rand::Rng;
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet, LinkedList};
-use crate::planet::Planet;
+use crate::{port, sector};
 
 pub type GalaxyId = usize;
 
 pub struct Galaxy {
     galaxy_id: GalaxyId,
     galaxy_name: String,
-    sectors: HashMap<SectorId, Sector>,
+    sector_ids: HashSet<SectorId>,
 }
 
 impl Galaxy {
     pub fn new(galaxy_id: GalaxyId,
            galaxy_name: String,
     ) -> Galaxy {
-        Galaxy{galaxy_id, galaxy_name, sectors: Default::default()}
-    }
-
-    pub fn get_galaxy_id(&self) -> GalaxyId {
-        self.galaxy_id
-    }
-
-    pub fn get_galaxy_name(&self) -> &String {
-        &self.galaxy_name
-    }
-
-    pub fn get_sector(&self, sector_id: SectorId) -> &Sector {
-        self.sectors.get(&sector_id).unwrap()
-    }
-
-    pub fn get_mut_sector(&mut self, sector_id: SectorId) -> &mut Sector {
-        self.sectors.get_mut(&sector_id).unwrap()
+        Galaxy{galaxy_id, galaxy_name, sector_ids: Default::default()}
     }
 
     /// Creates a legacy Galaxy, and incorporates it into the universe.
@@ -60,15 +43,14 @@ impl Galaxy {
         // create all the sectors first.
         // start with root sector, then do all the rest.
         println!("Creating {} sectors...", sector_count);
-        let root_sector = Sector::new();
-        let root_sector_id = root_sector.get_sector_id();
-        galaxy.sectors.insert(root_sector_id, root_sector);
+        let root_sector_id = sector::create_sector();
+        galaxy.sector_ids.insert(root_sector_id);
 
         let mut last_sector_id = root_sector_id;
         for _ in 1..sector_count {
-            let sector = Sector::new();
-            last_sector_id = sector.get_sector_id();
-            galaxy.sectors.insert(sector.get_sector_id(), sector);
+            let new_sector_id = sector::create_sector();
+            last_sector_id = new_sector_id;
+            galaxy.sector_ids.insert(new_sector_id);
         }
 
         // Now do initial random-ish linking. For each sector, link to another sector with a
@@ -78,7 +60,7 @@ impl Galaxy {
         let highest_sector_id = (root_sector_id + sector_count - 1) as SectorId;
         let mut rng = rand::rng();
         for sector_id in root_sector_id..(last_sector_id + 1) as SectorId {
-            if !galaxy.get_sector(sector_id).has_max_links() {
+            if !sector::get_sector(sector_id).unwrap().has_max_links() {
                 loop {
                     // Set the range such that it allows values too low or too high.
                     // If the result is indeed out of range, bend it up or down as necessary.
@@ -95,8 +77,8 @@ impl Galaxy {
                             target_id = highest_sector_id as isize;
                         }
 
-                        if !galaxy.get_sector(target_id as SectorId).has_max_links() {
-                            galaxy.link_sectors(sector_id, target_id as SectorId);
+                        if !sector::get_sector(target_id as SectorId).unwrap().has_max_links() {
+                            sector::link_sectors(sector_id, target_id as SectorId);
                             break;
                         }
                     }
@@ -125,7 +107,7 @@ impl Galaxy {
             let iy = rng.random_range(0..disjoint_glob.len());
             let sector_id2 = disjoint_glob[iy];
             println!("  Linking disjoint {} to {}", sector_id2, sector_id1);
-            galaxy.link_sectors(sector_id1, sector_id2);
+            sector::link_sectors(sector_id1, sector_id2);
             
             for disjoint_sector_id in disjoint_glob {
                 main_glob.push(disjoint_sector_id);
@@ -136,26 +118,26 @@ impl Galaxy {
         // But we don't want too many of them.
         println!("Cross-linking excess dead ends...");
         let mut dead_ends = LinkedList::<SectorId>::new();
-        for sector in galaxy.sectors.iter() {
-            if sector.1.get_link_count() == 1 {
-                dead_ends.push_back(*sector.0);
+        for sector_id in galaxy.sector_ids.clone() {
+            if sector::get_sector(sector_id).unwrap().get_link_count() == 1 {
+                dead_ends.push_back(sector_id);
             }
         }
 
         while dead_ends.len() > sector_count / 10 {
             let sector_id1 = dead_ends.pop_front().unwrap();
             let sector_id2 = dead_ends.pop_front().unwrap();
-            galaxy.link_sectors(sector_id1, sector_id2);
+            sector::link_sectors(sector_id1, sector_id2);
         }
 
         // breadth-first recursion - external caller should invoke with base_id set to root sector id,
         // and the distances map pre-populated with key of root sector id having value of zero.
         // We iterate over the neighbors setting them in the map with the distance one more than
         // that of the given base sector, then iterate again, recursing.
-        fn distance_func(sector_map: &HashMap<SectorId, Sector>, distances: &mut HashMap<SectorId, isize>, base_id: SectorId) {
+        fn distance_func(sector_ids: &HashSet<SectorId>, distances: &mut HashMap<SectorId, isize>, base_id: SectorId) {
             let neighbor_distance = distances.get(&base_id).unwrap() + 1;
             let mut neighbors_to_visit: HashSet<SectorId> = HashSet::new();
-            for neighbor_sector_id in sector_map.get(&base_id).unwrap().get_links() {
+            for neighbor_sector_id in sector::get_sector(base_id).unwrap().sector_links {
                 if !distances.contains_key(&neighbor_sector_id) {
                     neighbors_to_visit.insert(neighbor_sector_id);
                     distances.insert(neighbor_sector_id, neighbor_distance);
@@ -163,7 +145,7 @@ impl Galaxy {
             }
 
             for neighbor_sector_id in neighbors_to_visit.iter() {
-                distance_func(sector_map, distances, *neighbor_sector_id);
+                distance_func(sector_ids, distances, *neighbor_sector_id);
             }
         }
 
@@ -173,10 +155,10 @@ impl Galaxy {
             // We should do breadth-first, but this will work.
             let our_distance = distances.get(&base_id).unwrap();
             let new_distance = our_distance + 1;
-            for link_id in galaxy.get_sector(base_id).get_links().iter() {
-                if *distances.get_mut(link_id).unwrap() > new_distance {
-                    distances.insert(*link_id, new_distance);
-                    distance_recalculate_func(galaxy, distances, *link_id);
+            for link_id in sector::get_sector(base_id).unwrap().sector_links {
+                if *distances.get_mut(&link_id).unwrap() > new_distance {
+                    distances.insert(link_id, new_distance);
+                    distance_recalculate_func(galaxy, distances, link_id);
                 }
             }
         }
@@ -188,7 +170,7 @@ impl Galaxy {
         // but closures in rust cannot recurse, and we need to do that.
         let mut distances = HashMap::<SectorId, isize>::new();
         distances.insert(root_sector_id, 0);
-        distance_func(&galaxy.sectors, &mut distances, root_sector_id);
+        distance_func(&galaxy.sector_ids, &mut distances, root_sector_id);
 
         // Look at the distances. As we find sectors which are too far from the root sector,
         // link them one-way thereto, then recalculate distances for proximate sectors so we don't
@@ -198,7 +180,7 @@ impl Galaxy {
         for sector_id in root_sector_id..(last_sector_id + 1) as SectorId {
             if distances[&sector_id] > DISTANCE_LIMIT {
                 println!("  Linking sector {} to root sector", sector_id);
-                galaxy.get_mut_sector(sector_id).insert_link_to(root_sector_id);
+                sector::get_sector(sector_id).unwrap().insert_link_to(root_sector_id);
                 distances.insert(sector_id, 1);
                 distance_recalculate_func(&galaxy, &mut distances, sector_id);
             }
@@ -213,11 +195,12 @@ impl Galaxy {
         let mut remaining = sector_count / 15;
         while remaining > 0 {
             let sector_id = rng.random_range(root_sector_id..(last_sector_id + 1) as SectorId);
-            let sector = galaxy.get_mut_sector(sector_id);
+            let sector = sector::get_sector(sector_id).unwrap();
             if !sector.has_port() && distances[&sector_id] >= 3 {
-                let port = Port::new();
-                println!("Port {} ({}) is at sector {}", port.get_port_id(), port.get_port_name(), sector_id);
-                sector.set_port(port);
+                let new_port_id = port::create_port();
+                let new_port = port::get_port(new_port_id).unwrap();
+                println!("Port {} ({}) is at sector {}", new_port_id, new_port.port_name, sector_id);
+                sector::set_port(sector_id, new_port_id);
                 remaining -= 1;
             }
         }
@@ -230,24 +213,23 @@ impl Galaxy {
     // The glob containing the root sector id will be the first in the vector.
     pub fn create_disjoint_sector_sets(&self, root_sector_id: SectorId) -> LinkedList<Vec<SectorId>> {
         let mut disjoint_sector_sets = LinkedList::<Vec<SectorId>>::new();
-        let mut unassigned_sectors = self.sectors.keys().cloned().collect::<HashSet<_>>();
+        let mut unassigned_sectors = self.sector_ids.clone();
 
-        fn move_sector_id(sector_map: &HashMap<SectorId, Sector>,
+        fn move_sector_id(sectors: &HashSet<SectorId>,
                           sector_id: SectorId,
                           from_catalog: &mut HashSet<SectorId>,
                           to_set: &mut Vec<SectorId>) {
             if from_catalog.contains(&sector_id) {
                 to_set.push(sector_id);
                 from_catalog.remove(&sector_id);
-                let sector = sector_map.get(&sector_id).unwrap();
-                for neighbor_sector_id in sector.get_links() {
-                    move_sector_id(sector_map, neighbor_sector_id, from_catalog, to_set);
+                for neighbor_sector_id in sector::get_sector(sector_id).unwrap().sector_links {
+                    move_sector_id(sectors, neighbor_sector_id, from_catalog, to_set);
                 }
             }
         }
 
         let mut disjoint_set: Vec<SectorId> = Vec::new();
-        move_sector_id(&self.sectors, root_sector_id, &mut unassigned_sectors, &mut disjoint_set);
+        move_sector_id(&self.sector_ids, root_sector_id, &mut unassigned_sectors, &mut disjoint_set);
         disjoint_sector_sets.push_back(disjoint_set);
         
         loop {
@@ -258,7 +240,7 @@ impl Galaxy {
 
             let sector_id = entry.unwrap();
             let mut disjoint_set: Vec<SectorId> = Vec::new();
-            move_sector_id(&self.sectors, *sector_id, &mut unassigned_sectors, &mut disjoint_set);
+            move_sector_id(&self.sector_ids, *sector_id, &mut unassigned_sectors, &mut disjoint_set);
             disjoint_sector_sets.push_back(disjoint_set);
         }
 
@@ -284,15 +266,14 @@ impl Galaxy {
         let mut galaxy = Galaxy::new(galaxy_id, galaxy_name);
 
         println!("Creating ~{} sectors...", sector_count);
-        let root_sector = Sector::new();
-        let mut base_sector_id = root_sector.get_sector_id();
-        galaxy.sectors.insert(root_sector.get_sector_id(), root_sector);
+        let mut base_sector_id = sector::create_sector();
+        galaxy.sector_ids.insert(base_sector_id);
 
         let mut last_sector_id = base_sector_id;
         for _ in 1..sector_count {
             for _ in 0..branch_count {
-                let sector = Sector::new();
-                galaxy.link_sectors(base_sector_id, sector.get_sector_id());
+                let new_sector_id = sector::create_sector();
+                sector::link_sectors(base_sector_id, new_sector_id);
             }
 
             last_sector_id = base_sector_id;
@@ -316,11 +297,11 @@ impl Galaxy {
         let mut remaining = sector_count / 15;
         while remaining > 0 {
             let sector_id = rng.random_range(lowest_target_sector_id..(last_sector_id + 1) as SectorId);
-            let sector = galaxy.get_mut_sector(sector_id);
-            if !sector.has_port() {
-                let port = Port::new();
-                println!("Port {} ({}) is at sector {}", port.get_port_id(), port.get_port_name(), sector_id);
-                sector.set_port(port);
+            if !sector::get_sector(sector_id).unwrap().has_port() {
+                let new_port_id = port::create_port();
+                let new_port = port::get_port(new_port_id).unwrap();
+                println!("Port {} ({}) is at sector {}", new_port_id, new_port.port_name, sector_id);
+                sector::set_port(sector_id, new_port_id);
                 remaining -= 1;
             }
         }
@@ -329,34 +310,16 @@ impl Galaxy {
     }
 
     // only for debugging purposes
-    pub fn dump(&self) {
-        for sector in self.sectors.values() {
-            let mut str: String = format!(":{} ->", sector.get_sector_id()); //"".to_owned();
-            for link in sector.get_links().iter() {
+    pub fn dump(self) {
+        for sector_id in self.sector_ids {
+            let sector = sector::get_sector(sector_id).unwrap();
+            let links = sector.sector_links;
+            let mut str: String = format!(":{} ->", sector_id); //"".to_owned();
+            for link in links {
                 let sub_str = format!(" {}", link);
                 str.push_str(&sub_str);
             }
             println!("{}", str);
-        }
-    }
-
-    /// Convenience function to create a bidirectional link between two sectors
-    /// in this galaxy - if the sectors do not exist, or if the same sector is
-    /// presented twice, we do nothing.
-    pub fn link_sectors(&mut self, sector_id_1: SectorId, sector_id_2: SectorId) {
-        if sector_id_1 != sector_id_2
-            && self.sectors.contains_key(&sector_id_1)
-            && self.sectors.contains_key(&sector_id_2) {
-            self.sectors.get_mut(&sector_id_1).unwrap().insert_link_to(sector_id_2);
-            self.sectors.get_mut(&sector_id_2).unwrap().insert_link_to(sector_id_1);
-        }
-    }
-
-    pub fn link_sector_to(&mut self, from_sector_id: SectorId, to_sector_id: SectorId) {
-        if from_sector_id != to_sector_id
-            && self.sectors.contains_key(&from_sector_id)
-            && self.sectors.contains_key(&to_sector_id) {
-            self.sectors.get_mut(&from_sector_id).unwrap().insert_link_to(to_sector_id);
         }
     }
 
@@ -390,86 +353,86 @@ impl Galaxy {
     /// the result is empty.
     ///
     /// # Arguments
-    /// * `from` sector id of the starting sector
-    /// * `to` sector id of the sector we're trying to reach
+    /// * `from_sector_id` sector id of the starting sector
+    /// * `to_sector_id` sector id of the sector we're trying to reach
     /// * `avoiding` set of sector ids of sectors we do not wish to traverse, or which we have
     /// * already traversed (so that we don't infinitely loop)
-    pub fn find_shortest_path_avoiding(&self, from: SectorId, to: SectorId, avoiding: &HashSet<SectorId>) -> Vec<SectorId> {
-        let mut result: Vec<SectorId> = Vec::new();
+    /// 
+    /// # Returns
+    /// Empty vector if no path is available, else a path to the destination sector presented as a
+    /// vector of sector-ids, in order, which must be traversed to reach the target path
+    /// (inclusive of the target sector, non-inclusive of the starting sector).
+    pub fn find_shortest_path_avoiding(&self, from_sector_id: SectorId, to_sector_id: SectorId, avoiding: &HashSet<SectorId>) -> Vec<SectorId> {
+        // simplest case - the path to ourselves is empty
+        if from_sector_id == to_sector_id {
+            return Vec::new();
+        }
 
-        let sector1 = &self.sectors.get(&from);
-        let sector2 = &self.sectors.get(&to);
-        if sector1.is_some() && sector2.is_some() {
-            let sector1 = sector1.unwrap();
+        let from_sector = sector::get_sector(from_sector_id).unwrap();
 
-            // First loop - look for the short completion
-            for sector_id in sector1.get_links().iter() {
-                if *sector_id == to {
-                    result.push(to);
-                    break;
-                }
+        // Look for the short completion (do we have a direct link to the target sector?)
+        // Note that we have to clone sector_links, because if we don't, rust helpfully "moves" it
+        // so that we cannot iterate over it again later on.
+        let sector_links = from_sector.sector_links;
+        for sector_id in sector_links.clone() {
+            if sector_id == to_sector_id {
+                let mut result: Vec<SectorId> = Vec::new();
+                result.push(to_sector_id);
+                return result;
             }
+        }
 
-            if result.is_empty() {
-                // Second loop - recurse over links which are not in the avoid list.
-                let mut sub_avoiding: HashSet<SectorId> = avoiding.clone();
-                let mut pending_result: Vec<SectorId> = Vec::new();
-                sub_avoiding.insert(from);
+        // Place ourselves into the avoidance set, then recurse over the links which are not in the
+        // newly-expanded avoidance set.
+        let mut pending_result: Vec<SectorId> = Vec::new();
+        let mut sub_avoiding: HashSet<SectorId> = avoiding.clone();
+        sub_avoiding.insert(from_sector_id);
 
-                for sector_id in sector1.get_links().iter() {
-                    let sub_result = self.find_shortest_path_avoiding(*sector_id, to, &sub_avoiding);
-                    if !sub_result.is_empty() {
-                        if pending_result.is_empty() || sub_result.is_empty() {
-                            pending_result = sub_result;
-                        }
+        for sector_id in sector_links {
+            if !sub_avoiding.contains(&sector_id) {
+                let mut sub_result = self.find_shortest_path_avoiding(sector_id, to_sector_id, &sub_avoiding);
+                if !sub_result.is_empty() {
+                    sub_result.insert(0, from_sector_id);
+                    if pending_result.is_empty() || (!sub_result.is_empty() && (sub_result.len() < pending_result.len())) {
+                        pending_result = sub_result;
                     }
                 }
             }
         }
 
-        result
+        pending_result
     }
 
     /// Loads all the galaxies from the given database connection.
+    /// Only to be invoked after loading all the ports, planets, and sectors.
     ///
     /// # Arguments
     /// * `database` open database connection, containing a valid game database.
-    pub fn load_galaxies(database: &Connection) -> Result<HashMap<GalaxyId, Galaxy>> {
-        let mut planet_map = Planet::load_planets(database)?;
-        println!("Loaded {} planets", planet_map.len());
-        let mut port_map = Port::load_ports(database)?;
-        println!("Loaded {} ports", port_map.len());
-        let mut sector_map= Sector::load_sectors(database, &mut planet_map, &mut port_map)?;
-        println!("Loaded {} sectors", sector_map.len());
-
+    pub fn load_galaxies(database: &Connection) -> rusqlite::Result<HashMap<GalaxyId, Galaxy>> {
         let mut stmt = database.prepare("SELECT galaxyId, galaxyName FROM galaxies;")?;
         let mapped_galaxies = stmt.query_map([], |row| {
-            Ok(Galaxy{ galaxy_id: row.get(0)?, galaxy_name: row.get(1)?, sectors: Default::default() })
+            Ok(Galaxy{ galaxy_id: row.get(0)?, galaxy_name: row.get(1)?, sector_ids: Default::default() })
         })?;
 
         let mut galaxies: HashMap<GalaxyId, Galaxy> = HashMap::new();
         for galaxy_result in mapped_galaxies {
             let mut galaxy = galaxy_result?;
-            let mut galaxy_sector_map: HashMap<SectorId, Sector> = HashMap::new();
             
             let mut stmt =
                 database.prepare("SELECT sectors.sectorId FROM sectors \
                     JOIN galaxies_to_sectors \
                     WHERE sectors.sectorId = galaxies_to_sectors.sectorId \
                     AND galaxies_to_sectors.galaxyId = :galaxyId")?;
-            let mapped_sectors =
+            let sector_id_iter =
                 stmt.query_map(&[(":galaxyId", &galaxy.galaxy_id.to_string())], |row| {
                     Ok(row.get(0)?)
             })?;
 
-            for result_sector in mapped_sectors {
-                let sector_id: SectorId = result_sector?;
-                let sector = sector_map.remove(&sector_id).unwrap();
-                galaxy_sector_map.insert(sector_id, sector);
+            for sector_id_result in sector_id_iter {
+                galaxy.sector_ids.insert(sector_id_result?);
             }
 
-            println!("Loaded galaxy {}:{} with {} sectors", galaxy.galaxy_id, galaxy.galaxy_name, galaxy_sector_map.len());
-            galaxy.sectors = galaxy_sector_map;
+            println!("Loaded galaxy {}:{} with {} sectors", galaxy.galaxy_id, galaxy.galaxy_name, galaxy.sector_ids.len());
             galaxies.insert(galaxy.galaxy_id, galaxy);
         }
 
@@ -478,31 +441,15 @@ impl Galaxy {
 
     /// Invoked by the initializer to store everything to the database...
     /// Not intended for use during engine processing, since all persistence during execution is piecemeal.
-    pub fn persist(&self, database: &Connection) -> Result<()> {
+    pub fn persist(&self, database: &Connection) -> rusqlite::Result<()> {
         let statement = "INSERT INTO galaxies (galaxyId, galaxyName) VALUES (?1, ?2);";
         let params = params![self.galaxy_id, self.galaxy_name];
-        match database.execute(statement, params) {
-            Ok(_) => (),
-            Err(err) => {
-                println!("Database error: {}", err);
-                println!("{}", statement);
-                panic!("Shutting down");
-            }
-        }
+        database.execute(statement, params)?;
 
-        for sector in self.sectors.values() {
+        for sector_id in self.sector_ids.iter() {
             let statement = "INSERT INTO galaxies_to_sectors (galaxyId, sectorId) VALUES (?1, ?2);";
-            let params = params![self.galaxy_id, sector.get_sector_id()];
-            match database.execute(statement, params) {
-                Ok(_) => (),
-                Err(err) => {
-                    println!("Database error: {}", err);
-                    println!("{}", statement);
-                    panic!("Shutting down");
-                }
-            }
-
-            sector.persist(database)?;
+            let params = params![self.galaxy_id, *sector_id];
+            database.execute(statement, params)?;
         }
         
         Ok(())
