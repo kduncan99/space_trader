@@ -19,6 +19,7 @@ pub const DB_BUILD_STATEMENTS: &'static [&'static str] = &[
                 userName TEXT NOT NULL UNIQUE, \
                 password TEXT, \
                 gameName TEXT, \
+                lastLoginTimeStamp INTEGER, \
                 isDisabled INTEGER NOT NULL,\
                 requestsPerDay INTEGER, \
                 requestsRemaining INTEGER);",
@@ -82,7 +83,7 @@ fn build_database() -> Result<(), String> {
         for statement in DB_BUILD_STATEMENTS {
             database.execute(statement, ())?;
         }
-        
+
         Ok(database)
     }() {
         Ok(database) => database,

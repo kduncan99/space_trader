@@ -17,6 +17,15 @@ pub struct Session {
     is_closed: bool,
 }
 
+pub fn close_session(session_id: &SessionId) {
+    for session in SESSIONS.lock().unwrap().values_mut() {
+        if session.session_id == *session_id {
+            session.is_closed = true;
+            break;
+        }
+    }
+}
+
 pub fn create_session(user_id: UserId) -> SessionId {
     // Is there any other session open for the user? If so, close it.
     for session in SESSIONS.lock().unwrap().values_mut() {
@@ -41,17 +50,9 @@ pub fn get_session(session_id: &SessionId) -> Option<Session> {
     None
 }
 
+// Iterates over sessions, removing those which have been closed
 pub fn prune_sessions() {
-    // TODO this probably won't work - also, this should be a two-step process.
-    //   (we need this loop to timeout the session, simply setting close)
-    // then we need this function to go find all the closed sessions and remove them
-    //   SAFELY from the container.
-    for session in SESSIONS.lock().unwrap().values_mut() {
-        if session.last_request_at.elapsed().as_secs() > SESSION_TIMEOUT_SECONDS {
-            // TODO post a timeout message to the user (not to the session)
-            SESSIONS.lock().unwrap().remove(&session.session_id);
-        }
-    }
+    SESSIONS.lock().unwrap().retain(|_, session| !session.is_closed);
 }
 
 /// Updates the timestamp for a session provided it exists, and is not closed

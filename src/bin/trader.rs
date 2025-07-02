@@ -1,5 +1,4 @@
 use std::{time::Duration};
-use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use crossbeam_channel::{select, tick, Receiver};
 use rusqlite::{Connection, OpenFlags};
@@ -10,7 +9,7 @@ fn main() {
     println!("Space Trader");
 
     match setup() {
-        Ok(connection) => process(),
+        Ok(_) => process(),
         Err(err) => panic!("Failed to open or load database: {}", err),
     }
 }

@@ -1,5 +1,6 @@
 use std::collections::{HashMap};
 use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection};
 
 pub type UserId = usize;
@@ -13,12 +14,19 @@ const DEFAULT_REQUESTS_PER_DAY: i32 = 150;
 static NEXT_USER_ID: LazyLock<Mutex<UserId>> = LazyLock::new(|| Mutex::new(1));
 static USERS: LazyLock<Mutex<HashMap<UserId, User>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+pub enum ValidationResult {
+    Success(UserId),
+    NoSuchUser,
+    IncorrectPassword,
+    UserIsDisabled,
+}
+
 pub struct User {
     pub user_id: UserId,
     pub user_name: String,
     pub user_password: String,
     pub game_name: String,
-    //
+    pub last_login_timestamp: Option<SystemTime>,
     pub is_disabled: bool,
     pub requests_per_day: Option<i32>, // if None, user has no limit
     pub requests_remaining: Option<i32> // None if the above is None
@@ -54,11 +62,15 @@ fn create_user(database: &Connection,
                user_password: String,
                user_game_name: String,
                requests_per_day: Option<i32>) -> Result<UserId, String> {
-    // TODO make sure another user with this user_name does not exist
+    if user_exists(&user_name) {
+        return Err("User already exists".to_string());
+    }
+
     let user = User {
         user_id,
         user_name,
         user_password,
+        last_login_timestamp: None,
         game_name: user_game_name,
         is_disabled: false,
         requests_per_day,
@@ -73,22 +85,31 @@ fn create_user(database: &Connection,
     Ok(user_id)
 }
 
+pub fn get_user(user_id: UserId) -> Option<User> {
+    for user in USERS.lock().unwrap().values() {
+        if user.user_id == user_id {
+            return Some(user.clone());
+        }
+    }
+    None
+}
+
 pub fn load_users(database: &Connection) -> Result<(), String> {
     USERS.lock().unwrap().clear();
 
     match || -> rusqlite::Result<()> {
         let mut stmt =
-            database.prepare("SELECT userId, userName, password, gameName, isDisabled, requestsPerDay, requestsRemaining FROM users")?;
+            database.prepare("SELECT userId, userName, password, gameName, lastLoginTimeStamp, \
+                                    isDisabled, requestsPerDay, requestsRemaining FROM users")?;
         let user_iter = stmt.query_map(params![], |row| {
-            Ok(User {
-                user_id: row.get(0)?,
-                user_name: row.get(1)?,
-                user_password: row.get(2)?,
-                game_name: row.get(3)?,
-                is_disabled: row.get(4)?,
-                requests_per_day: row.get(5)?,
-                requests_remaining: row.get(6)?
-            })
+            Ok(User::new(row.get(0)?, 
+                         row.get(1)?,
+                         row.get(2)?,
+                         row.get(3)?,
+                         row.get(4)?,
+                         row.get(5)?,
+                         row.get(6)?,
+                         row.get(7)?))
         })?;
 
         let mut highest_user_id: UserId = 0;
@@ -107,29 +128,78 @@ pub fn load_users(database: &Connection) -> Result<(), String> {
     }
 }
 
-pub fn validate_credentials(user_name: String, password: String) -> Option<UserId> {
+fn user_exists(user_name: &String) -> bool {
     for user in USERS.lock().unwrap().values() {
         if user_name.to_lowercase() == user.user_name.to_lowercase() {
-            if password == user.user_password {
-                return Some(user.user_id);
+            return true;
+        }
+    }
+    false
+}
+
+pub fn validate_credentials(user_name: &String, password: &String) -> ValidationResult {
+    for user in USERS.lock().unwrap().values() {
+        if user_name.to_lowercase() == user.user_name.to_lowercase() {
+            if *password == user.user_password {
+                if user.is_disabled {
+                    return ValidationResult::UserIsDisabled;
+                } else {
+                    return ValidationResult::Success(user.user_id);
+                }
             } else {
-                break;
+                return ValidationResult::IncorrectPassword;
             }
         }
     }
 
-    None
+    ValidationResult::NoSuchUser
 }
 
 impl User {
+    fn clone(&self) -> User {
+        User{user_id: self.user_id,
+            user_name: self.user_name.clone(),
+            user_password: "".to_string(),
+            game_name: self.game_name.clone(),
+            last_login_timestamp: self.last_login_timestamp,
+            is_disabled: self.is_disabled,
+            requests_per_day: self.requests_per_day,
+            requests_remaining: self.requests_remaining}
+    }
+
+    fn new(user_id: UserId,
+           user_name: String,
+           password: String,
+           game_name: String,
+           last_login: Option<u64>,
+           is_disabled: bool,
+           requests_per_day: Option<i32>,
+           requests_remaining: Option<i32>) -> User {
+        let time_stamp =
+            if last_login.is_none() {
+                None
+            } else {
+                let d = Duration::from_secs(last_login.unwrap());
+                Some(UNIX_EPOCH + d)
+            };
+        User{user_id, user_name, user_password: password, game_name, last_login_timestamp: time_stamp,
+            is_disabled, requests_per_day, requests_remaining}
+    }
+
     pub fn persist(&self, database: &Connection) -> Result<(), String> {
         match || -> rusqlite::Result<()> {
             let statement = "INSERT INTO users \
-                            (userId, userName, password, gameName, isDisabled, requestsPerDay, requestsRemaining) \
-                            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+                            (userId, userName, password, gameName, lastLoginTimeStamp, isDisabled, requestsPerDay, requestsRemaining) \
+                            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
             let is_disabled = if self.is_disabled { 1 } else { 0 };
+            let opt_time_stamp =
+                if self.last_login_timestamp.is_none() {
+                    None
+                } else {
+                    Some(self.last_login_timestamp.unwrap().duration_since(UNIX_EPOCH).unwrap().as_secs())
+                };
             let params =
-                params![self.user_id, self.user_name, self.user_password, self.game_name,
+                params![self.user_id, self.user_name, self.user_password, self.game_name, opt_time_stamp,
                     is_disabled, self.requests_per_day, self.requests_remaining];
             database.execute(statement, params)?;
             Ok(())
