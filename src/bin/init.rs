@@ -1,16 +1,16 @@
-use std::sync::{LazyLock, Mutex};
-use rusqlite::{Connection, OpenFlags, Result};
-use space_trader::universe;
+use rusqlite::{Connection, OpenFlags};
+use space_trader::galaxy;
+use space_trader::user;
 
 pub const DB_BUILD_STATEMENTS: &'static [&'static str] = &[
     "DROP TABLE IF EXISTS galaxies_to_sectors;",
     "DROP TABLE IF EXISTS sector_links;",
     "DROP TABLE IF EXISTS sectors_to_planets;",
     "DROP TABLE IF EXISTS sectors_to_ports;",
-    "DROP TABLE IF EXISTS galaxies;",
     "DROP TABLE IF EXISTS sectors;",
     "DROP TABLE IF EXISTS planets;",
     "DROP TABLE IF EXISTS ports;",
+    "DROP TABLE IF EXISTS galaxies;",
     "DROP TABLE IF EXISTS messages;",
     "DROP TABLE IF EXISTS users;",
 
@@ -24,7 +24,7 @@ pub const DB_BUILD_STATEMENTS: &'static [&'static str] = &[
                 requestsRemaining INTEGER);",
 
     "CREATE TABLE messages ( \
-                messageId INTEGER PRIMARY KEY, \
+                messageId INTEGER PRIMARY KEY NOT NULL, \
                 fromUserId INTEGER REFERENCES users(userId), \
                 toUserId INTEGER NOT NULL REFERENCES users(userId), \
                 timeStamp INTEGER NOT NULL, \
@@ -75,14 +75,23 @@ fn main() {
     }
 }
 
-fn build_database() -> Result<()> {
-    let database = Connection::open_with_flags("space-trader.db",
-                                               OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-    for statement in DB_BUILD_STATEMENTS {
-        database.execute(statement, ())?;
-    }
+fn build_database() -> Result<(), String> {
+    let database = match || -> rusqlite::Result<Connection> {
+        let database = Connection::open_with_flags("space-trader.db",
+                                                   OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        for statement in DB_BUILD_STATEMENTS {
+            database.execute(statement, ())?;
+        }
+        
+        Ok(database)
+    }() {
+        Ok(database) => database,
+        Err(msg) => return Err(format!("Failed to build database:{msg}")),
+    };
 
-    universe::initialize(database)?;
+    _ = user::create_admin_user(&database)?;
+    _ = user::create_normal_user(&database, "Neo".to_string(), "anderson".to_string(), "The One".to_string());
+    _ = galaxy::create_conventional_galaxy(&database, "Kronos".to_string(), 500)?;
 
     Ok(())
 }

@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+
 pub struct HttpResponse {
     code: u16,
+    headers: HashMap<String, String>,
     data: String,
 }
 
@@ -18,7 +21,19 @@ pub const HTTP_NOT_IMPLEMENTED: u16 = 501;
 impl HttpResponse {
 
     pub fn new(code: u16, data: &str) -> HttpResponse {
-        HttpResponse{code, data: data.into()}
+        HttpResponse{code, headers: HashMap::new(), data: data.into()}
+    }
+
+    pub fn new_with_headers(code: u16, headers: HashMap<String, String>, data: &str) -> HttpResponse {
+        HttpResponse{code, headers, data: data.into()}
+    }
+    
+    pub fn append_header(&mut self, key: &str, value: &str) {
+        self.headers.insert(key.into(), value.into());
+    }
+
+    pub fn is_successful(&self) -> bool {
+        self.code >= 200 && self.code < 299
     }
 
     pub fn to_string(&self) -> String {
@@ -36,6 +51,13 @@ impl HttpResponse {
             HTTP_NOT_IMPLEMENTED => "Not Implemented",
             _ => "Internal Server Error",
         };
-        format!("HTTP/1.1 {} {}\r\n\r\n{}\r\n", self.code, detail, self.data)
+        
+        let mut s = format!("HTTP/1.1 {} {}\r\n", self.code, detail);
+        for (key, value) in self.headers.clone() {
+            s.push_str(&format!("{}: {}\r\n", key, value));
+        }
+        s.push_str("\r\n");
+        s.push_str(&format!("{}\r\n", &self.data));
+        s
     }
 }

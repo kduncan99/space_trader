@@ -1,4 +1,3 @@
-use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
 use rand::Rng;
@@ -16,7 +15,7 @@ pub struct Port {
     //TODO resource info... generation/usage per cycle, current cost/price
 }
 
-pub fn create_port() -> PortId {
+pub fn create_port(database: &Connection) -> Result<PortId, String> {
     let mut next_port_id = NEXT_PORT_ID.lock().unwrap();
     let port_id = *next_port_id;
     *next_port_id += 1;
@@ -34,38 +33,50 @@ pub fn create_port() -> PortId {
         }
     }
 
-    PORTS.lock().unwrap().insert(port_id, Port { port_id, port_name });
-    port_id
+    let port = Port { port_id, port_name };
+    match port.persist(database) {
+        Ok(_) => (),
+        Err(e) => { return Err(e.to_string()); },
+    }
+
+    PORTS.lock().unwrap().insert(port_id, port);
+    Ok(port_id)
 }
 
 pub fn get_port(port_id: PortId) -> Option<Port> {
-    let lock = PORTS.lock().unwrap();
-    let port = lock.get(&port_id);
-    if port.is_none() {
-        None
-    } else {
-        Some(port.unwrap().clone())
+    for port in PORTS.lock().unwrap().values() {
+        if port.port_id == port_id {
+            return Some(port.clone());
+        }
     }
+    None
 }
 
 /// Creates a port map describing all the ports in the universe - Used when a game starts up.
-pub fn load_ports(database: &Connection) -> rusqlite::Result<()> {
+pub fn load_ports(database: &Connection) -> Result<(), String> {
     PORTS.lock().unwrap().clear();
 
-    let mut stmt = database.prepare("SELECT portId, portName FROM ports")?;
-    let port_iter = stmt.query_map([], |row| {
-        Ok(Port { port_id: row.get(0)?, port_name: row.get(1)? })
-    })?;
+    match || -> rusqlite::Result<()> {
+        let mut stmt = database.prepare("SELECT portId, portName FROM ports ORDER BY portId")?;
+        let port_iter = stmt.query_map([], |row| {
+            Ok(Port { port_id: row.get(0)?, port_name: row.get(1)? })
+        })?;
 
-    let mut next_port_id = NEXT_PORT_ID.lock().unwrap();
-    for port_result in port_iter {
-        let port = port_result?;
-        *next_port_id = max(*next_port_id, port.port_id + 1);
-        PORT_NAME_REGISTRY.lock().unwrap().insert(port.port_name.clone());
-        PORTS.lock().unwrap().insert(port.port_id + 1, port);
+        let mut highest_port_id: PortId = 0;
+        for port_result in port_iter {
+            let port = port_result?;
+            highest_port_id = port.port_id;
+            PORT_NAME_REGISTRY.lock().unwrap().insert(port.port_name.clone());
+            println!("Loaded port: {}", port.port_name);
+            PORTS.lock().unwrap().insert(port.port_id, port);
+        }
+
+        *NEXT_PORT_ID.lock().unwrap() = highest_port_id + 1;
+        Ok(())
+    }() {
+        Ok(()) => Ok(()),
+        Err(e) => Err(format!("Cannot load ports:{}", e)),
     }
-
-    Ok(())
 }
 
 impl Port {
@@ -75,11 +86,16 @@ impl Port {
 
     /// Writes information about this port to the database.
     /// To be used when the port is first created.
-    pub fn persist(&self, database: &Connection) -> rusqlite::Result<()> {
-        let statement = "INSERT INTO ports (portId, portName) VALUES (?1, ?2);";
-        let params = params![self.port_id, self.port_name];
-        database.execute(statement, params)?;
-        Ok(())
+    pub fn persist(&self, database: &Connection) -> Result<(), String> {
+        match || -> rusqlite::Result<()> {
+            let statement = "INSERT INTO ports (portId, portName) VALUES (?1, ?2);";
+            let params = params![self.port_id, self.port_name];
+            database.execute(statement, params)?;
+            Ok(())
+        }() {
+            Ok(()) => Ok(()),
+            Err(e) => Err(format!("Cannot persist port:{}", e)),
+        }
     }
 }
 
