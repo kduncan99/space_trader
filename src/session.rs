@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::Instant;
 use uuid::Uuid;
+use crate::user;
 use crate::user::UserId;
 
 pub type SessionId = String;
@@ -66,5 +67,9 @@ pub fn touch_session(session_id: &SessionId) {
 impl Session {
     pub fn clone(&self) -> Session {
         Session{session_id: self.session_id.clone(), user_id: self.user_id.clone(), last_request_at: Instant::now(), is_closed: false}
+    }
+
+    pub fn is_admin(&self) -> bool {
+        self.user_id == user::ADMIN_USER_ID
     }
 }

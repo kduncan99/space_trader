@@ -8,14 +8,34 @@ use std::sync::atomic::AtomicBool;
 use std::thread::JoinHandle;
 use base64::Engine;
 use base64::engine::general_purpose;
+use lazy_static::lazy_static;
 use crate::http_response::*;
-use crate::session::SessionId;
+use crate::session::{Session, SessionId};
 use crate::{session, user};
 
 pub static IS_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static HANDLER_HANDLES: LazyLock<Mutex<Vec<JoinHandle<()>>>> = LazyLock::new(|| Mutex::new(vec![]));
 pub static JOIN_HANDLE: LazyLock<Mutex<Option<JoinHandle<()>>>> = LazyLock::new(|| Mutex::new(None));
 pub static TERMINATE_FLAG: AtomicBool = AtomicBool::new(false);
-const MILLISECONDS_BETWEEN_NONBLOCKING_CALLS: u64 = 500;
+const MILLISECONDS_BETWEEN_NONBLOCKING_CALLS: u64 = 100;
+const HANDLER_PRUNE_RATIO: i32 = 100;
+
+struct HandlerEntry {
+    method: &'static str,
+    path: &'static str,
+    is_restricted: bool,
+    func: fn (&Session) -> HttpResponse,
+}
+
+lazy_static! {
+    static ref HANDLER_LOOKUP_TABLE: Vec<HandlerEntry> = {
+        let mut table = Vec::new();
+        table.push(HandlerEntry {method: "POST", path: "/admin/quit", is_restricted: true, func: handle_admin_quit});
+        table.push(HandlerEntry {method: "GET", path: "/poll", is_restricted: false, func: handle_poll});
+        table.push(HandlerEntry {method: "GET", path: "/", is_restricted: false, func: handle_no_operation});
+        table
+    };
+}
 
 // Public functions --------------------------------------------------------------------------------
 
@@ -30,7 +50,7 @@ pub fn start() {
 }
 
 pub fn stop() {
-    TERMINATE_FLAG.store(false, std::sync::atomic::Ordering::SeqCst);
+    TERMINATE_FLAG.store(true, std::sync::atomic::Ordering::SeqCst);
 
     let mut join_lock = JOIN_HANDLE.lock().unwrap();
     if join_lock.is_some() {
@@ -66,7 +86,7 @@ fn decode_headers(text_lines: &Vec<String>) -> HashMap<String, String> {
 //      The request will be handled, and the session-id will be returned in the response header.
 fn handle_connection(stream: &TcpStream) -> HttpResponse {
     let buf_reader = BufReader::new(stream);
-    let mut http_request: Vec<String> = buf_reader
+    let http_request: Vec<String> = buf_reader
         .lines()
         .map(|result| result.unwrap())
         .take_while(|line| !line.is_empty())
@@ -75,89 +95,84 @@ fn handle_connection(stream: &TcpStream) -> HttpResponse {
     println!("From {}:{}", stream.peer_addr().unwrap(), http_request.get(0).unwrap());
 
     let headers = decode_headers(&http_request);
-    let session_id;
-
-    let auth_value = headers.get("authorization");
-    if auth_value.is_some() {
-        session_id =
+    let session_id: SessionId = {
+        let auth_value = headers.get("authorization");
+        if auth_value.is_some() {
             match validate_authorization(auth_value.unwrap()) {
                 Ok(session_id) => session_id,
                 Err(http_response) => {
                     return http_response;
                 }
-            };
-    } else {
-        let sid = headers.get("x-session-id");
-        if sid.is_none() {
-            return HttpResponse::new(HTTP_UNAUTHORIZED, "Unauthorized");
+            }
+        } else {
+            let sid = headers.get("x-session-id");
+            if sid.is_none() {
+                return HttpResponse::new(HTTP_UNAUTHORIZED, "Unauthorized");
+            }
+            sid.unwrap().clone()
         }
-        session_id = sid.unwrap().clone();
+    };
+    let session = session::get_session(&session_id);
+    if session.is_none() {
+        return HttpResponse::new(HTTP_INTERNAL_SERVER_ERROR, "Session disappeared");
     }
+    let session = session.unwrap();
+    session::touch_session(&session_id);
 
     // Grab the method and the url - we don't care about the http version.
-    // The URL is deconstructed into a vector of strings according to the path components.
-    // We do some shenanigans on the URL, primarily caused by Rust not giving us a nice simple
-    // substring function.
     let leading_parts = http_request.get(0).unwrap().split(" ").collect::<Vec<&str>>();
     if leading_parts.len() < 2 {
         return HttpResponse::new(HTTP_BAD_REQUEST, "Badly-formatted method/URL");
     }
 
     let method = leading_parts.get(0).unwrap().to_string().to_uppercase();
-    let url = leading_parts.get(1).unwrap().to_string().to_lowercase();
-    let clean_url = if url.starts_with("/") { url.strip_prefix("/").unwrap() } else { url.as_str() };
-
-    let mut response = match clean_url {
-        "admin/quit" => handle_admin_quit(&session_id, &method),
-        "poll" => handle_poll(&session_id, &method),
-        "" => handle_no_operation(&session_id, &method),
-        _ => HttpResponse::new(HTTP_NOT_FOUND, "Path Not Recognized"),
-    };
-    
-    if response.is_successful() {
-        response.append_header("x-session-id", session_id.as_str());
+    let mut url = leading_parts.get(1).unwrap().to_string().to_lowercase();
+    if url.is_empty() {
+        url = "/".to_string();
     }
-    response
+
+    let mut found_path = false;
+    for entry in HANDLER_LOOKUP_TABLE.iter() {
+        if url == entry.path {
+            found_path = true;
+            if method == entry.method {
+                return if entry.is_restricted && !session.is_admin() {
+                    HttpResponse::new(HTTP_FORBIDDEN, "You are neither cosmic, nor an overlord.")
+                } else {
+                    let mut response = (entry.func)(&session);
+                    if response.is_successful() {
+                        response.append_header("x-session-id", session_id.as_str());
+                    }
+                    response
+                }
+            }
+        }
+    }
+
+    if found_path {
+        // we found a match on the path, but not the method
+        HttpResponse::new(HTTP_METHOD_NOT_ALLOWED, "{method} not allowed on path {url}")
+    } else {
+        // we did not find the path
+        HttpResponse::new(HTTP_NOT_FOUND, "path {url} not found")
+    }
 }
 
-fn handle_admin_quit(session_id: &SessionId, method: &String) -> HttpResponse {
-    if method != "POST" {
-        return HttpResponse::new(HTTP_BAD_REQUEST, "Method Not Allowed");
-    }
-    
-    let session = session::get_session(session_id);
-    if session.is_none() {
-        return HttpResponse::new(HTTP_INTERNAL_SERVER_ERROR, "");
-    }
-
-    if session.unwrap().user_id != user::ADMIN_USER_ID {
-        return HttpResponse::new(HTTP_FORBIDDEN, "You are not a real overlord");
-    }
-
+fn handle_admin_quit(session: &Session) -> HttpResponse {
     // TODO send messages to all and sundry
     TERMINATE_FLAG.store(true, std::sync::atomic::Ordering::SeqCst);
-    session::touch_session(session_id);
     HttpResponse::new(HTTP_OK, "Sent termination request to server")
 }
 
-fn handle_no_operation(session_id: &SessionId, method: &String) -> HttpResponse {
-    if method != "GET" {
-        return HttpResponse::new(HTTP_BAD_REQUEST, "Method Not Allowed");
-    }
-
-    session::touch_session(session_id);
+fn handle_no_operation(session: &Session) -> HttpResponse {
     HttpResponse::new(HTTP_OK, "")
 }
 
-fn handle_poll(session_id: &SessionId, method: &String) -> HttpResponse {
-    if method != "GET" {
-        return HttpResponse::new(HTTP_BAD_REQUEST, "Method Not Allowed");
-    }
-
+fn handle_poll(session: &Session) -> HttpResponse {
     // TODO go grab pending messages for this user
-
-    session::touch_session(session_id);
-    HttpResponse::new(HTTP_OK, "")
+    let mut data: String = "".to_string();
+    data.push_str("Place-holder message\r\n");
+    HttpResponse::new(HTTP_OK, data.as_str())
 }
 
 // Checks the authorization value against our users.
@@ -193,20 +208,33 @@ fn worker() {
 
     let listener = TcpListener::bind("127.0.0.1:2000").unwrap();
     _ = listener.set_nonblocking(true);
+    let mut prune_counter = HANDLER_PRUNE_RATIO;
     loop {
         if TERMINATE_FLAG.load(std::sync::atomic::Ordering::SeqCst) {
             break;
         }
 
+        // Every n-th time through the loop, we go prune the join handles.
+        // They are preserved solely for the purposes of waiting for them to complete
+        // when the server shuts down... but we don't want them to hang around the whole
+        // time we are server-ing.
+        prune_counter -= 1;
+        if prune_counter == 0 {
+            HANDLER_HANDLES.lock().unwrap().retain(|handle| handle.is_finished());
+            prune_counter = HANDLER_PRUNE_RATIO;
+        }
+
         match listener.incoming().next() {
             Some(Ok(mut stream)) => {
-                let response = handle_connection(&stream);//TODO spawn this
-                stream.write_all(response.to_string().as_bytes()).unwrap();
+                let handle = thread::spawn(move || -> () {
+                    let response = handle_connection(&stream);
+                    stream.write_all(response.to_string().as_bytes()).unwrap();
+                });
+                HANDLER_HANDLES.lock().unwrap().push(handle);
             }
             Some(Err(ref e)) if e.kind() == io::ErrorKind::WouldBlock => {
                 // No connection available, wait for a short time
                 thread::sleep(Duration::from_millis(MILLISECONDS_BETWEEN_NONBLOCKING_CALLS));
-                // TODO should we do session pruning here?
             }
             Some(Err(e)) => {
                 // Handle other errors
@@ -221,6 +249,16 @@ fn worker() {
         }
     }
 
-    IS_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+    // Wait for workers to terminate - this normally is very quick;
+    // we just want to make sure none of them accidentally get stopped in the middle of something.
+    while HANDLER_HANDLES.lock().unwrap().len() > 0 {
+        let handler = HANDLER_HANDLES.lock().unwrap().pop();
+        if handler.is_some() {
+            _ = handler.unwrap().join();
+        }
+    }
+
     // TODO terminate outstanding sessions... what does this mean?
+    println!("Server stopping...");
+    IS_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
 }
